@@ -1,15 +1,12 @@
 // Generator: run options, the worker/claim board, and email setup.
 
-import { el, fill } from "../core/dom.js";
+import { el, fill, copyText } from "../core/dom.js";
 import { api } from "../core/api.js";
 import { toast, confirmDialog } from "../core/toast.js";
 import { card, button, badge, metric } from "../core/ui.js";
 import { locateCard, openEnvSetup, ensureEnvironment } from "./generator/setup.js";
-import { createMailCard } from "./generator/mail.js";
 import { can, isHeadless, platform } from "../core/caps.js";
 import { createClaimBatch } from "./claim-batch.js";
-import { createAutoGenerate } from "./auto-generate.js";
-import { t } from "../core/i18n.js";
 
 const WORKER_TONE = {
   running: "ok", starting: "warn", exited: "ok", failed: "err", killed: "err",
@@ -33,7 +30,7 @@ function planBadges(w) {
   return out;
 }
 
-function workerCard(w, onStop, onRemove) {
+function workerCard(w, onStop, onRemove, onDetail) {
   const live = w.state === "running" || w.state === "starting";
   const lines = (w.lines || []).slice(-6);
 
@@ -43,9 +40,16 @@ function workerCard(w, onStop, onRemove) {
       el("b", { class: "job__name truncate", text: w.name }),
       badge(w.state, WORKER_TONE[w.state]),
       w.email ? el("span", { class: "mono text-xs muted truncate", text: w.email }) : null,
-      w.proxy ? el("span", { class: "mono text-xs faint", title: w.proxy, text: trimProxy(w.proxy) }) : null,
-      el("span", { class: "faint text-xs", text: t("gen.captcha") + " " + (w.captcha || "—") }),
+      w.route_label || w.proxy ? el("span", { class: "mono text-xs faint", title: w.proxy,
+        text: w.route_label || trimProxy(w.proxy) }) : null,
+      el("span", { class: "faint text-xs", text: "captcha " + (w.captcha || "—") }),
       ...planBadges(w),
+      w.has_log && platform() === "windows"
+        ? button({ label: "Open log", variant: "quiet", onClick: () => onDetail(w, "open-log") }) : null,
+      w.has_log
+        ? button({ label: "Copy log", variant: "quiet", onClick: () => onDetail(w, "log") }) : null,
+      w.has_password
+        ? button({ label: "Copy password", variant: "quiet", onClick: () => onDetail(w, "password") }) : null,
       el("span", { class: "spacer" }),
       live
         ? button({ label: t("gen.kill"), variant: "danger", onClick: () => onStop(w.name) })
@@ -96,9 +100,7 @@ function claimCard(c, onStop, onRemove) {
 export async function mount({ root, signal }) {
   let status = null;
   const claimStates = new Map();
-  const mail = createMailCard();
   const batch = createClaimBatch({ signal });
-  const auto = createAutoGenerate({ signal });
 
   const optionsBox = el("div", { class: "grid", style: { gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" } });
   const boardBox = el("div", { class: "stack--tight" });
@@ -112,12 +114,13 @@ export async function mount({ root, signal }) {
   const controls = {};
   // Option-backed switch: kept outside `controls` because the field wrapper is
   // a <label>, not an input.
-  let claimStartOn = true;
+  let claimStartOn = false;
 
   function field(key, label, node, help) {
     controls[key] = node;
+    if (node.matches("input, select")) node.id = "generator-" + key;
     return el("div", { class: "field" }, [
-      el("label", { class: "field__label", text: label }),
+      el("label", { class: "field__label", for: node.id || null, text: label }),
       node,
       help ? el("div", { class: "field__help", text: help }) : null,
     ]);
@@ -146,18 +149,17 @@ export async function mount({ root, signal }) {
     const body = {
       captcha: controls.captcha.value,
       captcha_strategy: controls.strategy.value,
-      ip_source: controls.ip.value,
+      ip_source: ipSources[0],
+      ip_sources: ipSources,
+      ip_mode: ipMode,
+      ip_pick: ipPick,
       proxy_types: controls.ptypes.value,
       country: controls.country.value,
       pin_proxy: controls.pin.value.trim(),
       browser_display: controls.display.value,
       retries: parseInt(controls.retries.value, 10) || 0,
       claim_start: claimStartOn,
-      custom_ai_url: controls.aiUrl.value.trim(),
-      custom_ai_model: controls.aiModel.value.trim(),
     };
-    const aiKey = controls.aiKey.value.trim();
-    if (aiKey) body.custom_ai_key = aiKey;
     // Capture controls before queueing: navigation can detach them while an
     // earlier save is still in flight. The flush intentionally outlives signal.
     const saved = saveQueue.then(async () => {
@@ -190,7 +192,6 @@ export async function mount({ root, signal }) {
     clearTimeout(feedbackTimer);
     window.removeEventListener("beforeunload", warnUnsaved);
     if (saveTimer !== null) persistOptions().catch(() => {});
-    auto.destroy();
   }
   signal.addEventListener("abort", destroy, { once: true });
   function warnUnsaved(event) {
@@ -200,6 +201,89 @@ export async function mount({ root, signal }) {
   }
   window.addEventListener("beforeunload", warnUnsaved);
 
+  let ipSources = [];
+  let ipMode = "spread";
+  let ipPick = "";
+  let renderIpExits;
+
+  function ipField(o) {
+    const known = Array.isArray(o.ip_sources) && o.ip_sources.length
+      ? o.ip_sources : [["socks", "pool"].includes(o.ip_source) ? "pool" : o.ip_source || "direct"];
+    ipSources = known.filter((s) => ["pool", "direct", "pin", "psiphon", "surfshark"].includes(s));
+    if (!ipSources.length) ipSources = ["direct"];
+    ipMode = o.ip_mode === "single" ? "single" : "spread";
+    ipPick = o.ip_pick || "";
+
+    const changed = () => { renderIpExits(true); syncVisibility(); saveOptions(); };
+    const card = (id, label, detail) => {
+      const input = el("input", { type: "checkbox", checked: ipSources.includes(id) });
+      input.addEventListener("change", () => {
+        if (!input.checked && ipSources.length === 1) {
+          input.checked = true;
+          toast("Keep at least one IP source selected", "warn");
+          return;
+        }
+        ipSources = input.checked ? [...ipSources, id] : ipSources.filter((s) => s !== id);
+        changed();
+      });
+      return el("label", { class: "chip", title: detail }, [input, el("span", { text: label })]);
+    };
+    const modeOption = (value, title, detail) => {
+      const input = el("input", { type: "radio", name: "generator-ip-mode", checked: ipMode === value });
+      input.addEventListener("change", () => { ipMode = value; changed(); });
+      return el("label", { class: "chip", title: detail }, [input, el("span", { text: title })]);
+    };
+
+    const vpnSources = ["psiphon", "surfshark"];
+    const pick = el("select", { class: "select", id: "generator-ippick", "aria-label": "Exit in use" });
+    pick.addEventListener("change", () => { ipPick = pick.value; saveOptions(); });
+    const pickSlot = el("div", { class: "ip-pick", hidden: true }, [pick]);
+    const help = el("div", { class: "field__help" });
+    const modeRow = el("div", { class: "row ip-line" }, [
+      el("span", { class: "field__label ip-label", text: "Mode" }),
+      modeOption("spread", "Random", "Each signup picks a random connected exit"),
+      modeOption("single", "Stay on one", "Use the chosen VPN exit or the first connected VPN exit if it goes offline"),
+      pickSlot,
+    ]);
+    let renderedChoices;
+    renderIpExits = (edited = false) => {
+      const selectedVpns = vpnSources.filter((source) => ipSources.includes(source));
+      modeRow.hidden = !selectedVpns.length;
+      pickSlot.hidden = ipMode !== "single" || modeRow.hidden;
+      help.textContent = modeRow.hidden ? "Pick one or more IP sources."
+        : "Signups use the selected VPNs. Connect at least one exit before starting.";
+      if (pickSlot.hidden) return;
+      const choices = (status?.options?.ip_exits || []).filter((e) =>
+        selectedVpns.includes(e.key.split(":")[0]));
+      if (edited && !selectedVpns.includes(ipPick.split(":")[0])) ipPick = choices[0]?.key || "";
+      const selected = choices.some((e) => e.key === ipPick) ? ipPick : "";
+      const options = selected ? choices : [{ key: "", label: choices.length
+        ? "First connected VPN exit" : "No connected VPN exits" }, ...choices];
+      const signature = JSON.stringify(options);
+      if (signature !== renderedChoices) {
+        fill(pick, options.map((e) => el("option", { value: e.key, text: e.label })));
+        renderedChoices = signature;
+      }
+      pick.value = selected;
+      pick.disabled = !choices.length;
+    };
+
+    const field = el("div", { class: "field ip-field" }, [
+      el("div", { class: "row ip-line" }, [
+        el("span", { class: "field__label ip-label", text: "IP sources" }),
+        card("pool", "Proxy pool (" + (o.pool_available || 0) + ")", "Rotates proxies from the pool"),
+        card("direct", "My network", "No proxy"),
+        card("pin", "Pinned proxy", "One fixed proxy address"),
+        card("psiphon", "Psiphon", "Connected Psiphon regions"),
+        card("surfshark", "Surfshark", "Connected Surfshark locations"),
+      ]),
+      modeRow,
+      help,
+    ]);
+    renderIpExits();
+    return field;
+  }
+
   function buildOptions(o) {
     const select = (opts, value) => el("select", {
       class: "select", on: { change: () => { syncVisibility(); saveOptions(); } },
@@ -207,7 +291,7 @@ export async function mount({ root, signal }) {
 
     // The switch reflects any active claim pipeline: a seeded or persisted
     // legacy claim would otherwise read "Off" while still claiming.
-    claimStartOn = o.claim_start !== false || o.claim === true || o.claim500 === true;
+    claimStartOn = o.claim_start === true || o.claim === true || o.claim500 === true;
     const claimToggle = el("input", {
       class: "switch__input", type: "checkbox", checked: claimStartOn,
     });
@@ -234,11 +318,7 @@ export async function mount({ root, signal }) {
       field("strategy", "AI judge model", select([
         ["auto", "auto — CV + AI vote"], ["ai", "ai — AI judge only"], ["classic", "classic — CV solver"],
       ], o.captcha_strategy || "auto"), "How the solver picks the drag distance."),
-      field("ip", "IP source", select([
-        ["pool", "Proxy pool (" + (o.pool_available || 0) + ")"],
-        ["direct", "My network (no proxy)"],
-        ["pin", "Pinned proxy"],
-      ], ["pool", "socks"].includes(o.ip_source) ? "pool" : o.ip_source)),
+      ipField(o),
       field("ptypes", "Proxy types", select([
         ["all", "All types (" + ((o.types_counts || {}).all || 0) + ")"],
         ["socks", "socks4 + socks5 (" + ((o.types_counts || {}).socks || 0) + ")"],
@@ -307,24 +387,31 @@ export async function mount({ root, signal }) {
       controls.display.title = "";
     }
 
-    if (controls.ptypes) {
-      const usesPool = controls.ip?.value === "pool";
-      controls.ptypes.disabled = !usesPool;
-      controls.ptypes.title = usesPool ? "" : "Applies to the proxy pool source";
+    for (const key of ["ptypes", "country"]) {
+      if (controls[key]) controls[key].closest(".field").hidden = !ipSources.includes("pool");
     }
     if (controls.pin) {
-      controls.pin.closest(".field").hidden = controls.ip?.value !== "pin";
+      controls.pin.closest(".field").hidden = !ipSources.includes("pin");
     }
   }
 
   async function start() {
+    const email = await api.get("/admin/dash/generator/mail", { signal }).catch(() => null);
+    if (signal.aborted || destroyed) return;
+    if (!email?.ready) {
+      toast(email ? "Finish Email setup before starting. Configure routing and verify the worker inbox."
+        : "Could not check Email setup. Try again when the gateway is reachable.", "warn");
+      if (email) location.hash = "#/generator/mail";
+      return;
+    }
     if (!(await ensureEnvironment())) return;
     const count = parseInt(controls.count.value, 10) || 1;
     try {
       await persistOptions();
       const r = await api.post("/admin/dash/generator/start", { count });
       if (r?.error) { toast(r.error, "err"); return; }
-      toast("Started " + count + " worker" + (count === 1 ? "" : "s"), "ok");
+      const started = r.started.length;
+      toast("Started " + started + " worker" + (started === 1 ? "" : "s"), "ok");
       load();
     } catch (e) { toast("start: " + e.message, "err"); }
   }
@@ -381,6 +468,21 @@ export async function mount({ root, signal }) {
     }
   }
 
+  async function workerDetail(worker, action) {
+    try {
+      const result = await api.post(`/admin/dash/generator/workers/details/${action}`,
+        { name: worker.name, created: worker.created }, { signal });
+      if (signal.aborted || action === "open-log") return;
+      const password = action === "password";
+      const text = password ? result.password : result.log;
+      if (typeof text !== "string") throw new Error("Worker details are unavailable");
+      if (!await copyText(text)) throw new Error("Clipboard is unavailable");
+      toast(password ? "Password copied" : "Full log copied", "ok");
+    } catch (e) {
+      if (!signal.aborted) toast(e.message, "err");
+    }
+  }
+
   function paintBoard(st) {
     const workers = st.workers || [];
     const claims = st.claims || [];
@@ -399,44 +501,23 @@ export async function mount({ root, signal }) {
 
     const cards = [
       ...claims.map((c) => claimCard(c, stopClaim, removeClaim)),
-      ...workers.map((w) => workerCard(w, stopWorker, removeWorker)),
+      ...workers.map((w) => workerCard(w, stopWorker, removeWorker, workerDetail)),
     ];
     fill(boardBox, cards.length
       ? cards
       : el("div", { class: "empty" }, [
-          el("div", { class: "empty__title", text: t("gen.no_workers") }),
-          el("div", { class: "empty__text", text: t("gen.no_workers_hint") }),
+          el("div", { class: "empty__title", text: "No workers running" }),
+          el("div", { class: "empty__text", text: "Signup and claim workers appear here when they start." }),
         ]));
   }
 
-  function buildShell(st) {
-    const actions = el("div", { class: "row" }, [
-      button({ label: "Start", icon: "bolt", variant: "primary", onClick: start }),
+  function buildShell() {
+    const actions = el("div", { class: "row manual-signup-controls" }, [
+      button({ label: "Start manual signup", icon: "bolt", variant: "primary", size: "md", onClick: start }),
       button({ label: "Stop all", onClick: stopAll }),
       button({ label: "Environment setup", icon: "settings", onClick: () => openEnvSetup() }),
-      el("span", { class: "spacer" }),
-      button({ label: "Clear finished", variant: "quiet", onClick: clearFinished }),
+      el("span", { class: "manual-signup-status" }, [savedNote, saveFeedback]),
     ]);
-
-    const aiCard = card({
-      title: "AI judge endpoint",
-      desc: "Optional. Your own OpenAI-compatible vision model; empty uses this gateway.",
-      body: el("div", { class: "grid", style: { gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" } }, [
-        field("aiUrl", "Endpoint URL", el("input", {
-          class: "input input--mono", type: "text", value: st.options?.custom_ai_url || "",
-          placeholder: "https://api.openai.com/v1", on: { input: saveOptions },
-        })),
-        field("aiModel", "Model ID", el("input", {
-          class: "input input--mono", type: "text", value: st.options?.custom_ai_model || "",
-          placeholder: "e.g. gpt-4o-mini", on: { input: saveOptions },
-        })),
-        field("aiKey", "API key", el("input", {
-          class: "input", type: "password", autocomplete: "off",
-          placeholder: st.options?.custom_ai_key_set ? "Saved — type to replace" : "sk-…",
-          on: { input: saveOptions },
-        })),
-      ]),
-    });
 
     fill(root, el("div", { class: "stack" }, [
       statusError,
@@ -447,16 +528,14 @@ export async function mount({ root, signal }) {
           ])
         : null,
       summaryBox,
-      auto.node,
-      actions,
-      batch.node,
       card({
-        title: "Options",
-        actions: el("span", {}, [savedNote, saveFeedback]),
-        body: optionsBox,
+        title: "Manual signup",
+        desc: "Launch a one-time run using these settings. Use Auto Generate for unattended runs.",
+        body: el("div", { class: "stack" }, [actions, optionsBox]),
       }),
-      el("div", { class: "cols" }, [aiCard, mail.node]),
-      card({ title: "Workers", body: boardBox, flush: true }),
+      batch.node,
+      card({ title: "Workers", body: boardBox, flush: true,
+        actions: button({ label: "Clear finished", variant: "quiet", onClick: clearFinished }) }),
       card({
         title: "Pipeline",
         body: el("p", { class: "field__help", text:
@@ -490,14 +569,14 @@ export async function mount({ root, signal }) {
     const firstPaint = !status;
     status = st;
     if (firstPaint) {
-      buildShell(st);
+      buildShell();
       buildOptions(st.options || {});
       syncVisibility();
-      mail.refresh();
+    } else {
+      renderIpExits();
     }
     paintBoard(st);
     batch.refresh();
-    auto.refresh();
   };
 
   await load();

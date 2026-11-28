@@ -1421,7 +1421,14 @@ def signup(email, password, mail=None):
                                  'credentials saved to recovery_accounts.txt if writable; '
                                  'NOT retrying', finish_status)
                     return 'SIGNUP_FINISH_FAILED'
-                return None
+                try:
+                    _save_recovery_account(email, password, 'finish_failed|no_response')
+                except OSError:
+                    logger.error('Writing the recovery file failed', exc_info=True)
+                logger.error('finish_signup returned no response, no account token; '
+                             'credentials saved to recovery_accounts.txt if writable; '
+                             'NOT retrying')
+                return 'SIGNUP_FINISH_FAILED'
 
             except Exception as e:
                 logger.error(f"Error: {e}")
@@ -1475,7 +1482,15 @@ class CatchAllMail:
             _secret_filter.remember(value)
 
     def _pick_domain(self) -> str:
-        """Rotation across the user's configured domains (ZAI_MAIL_DOMAIN wins)."""
+        """Pick a domain for this signup.
+
+        ZAI_MAIL_DOMAINS (set by the dashboard) is the exact routed set and is
+        used as-is; otherwise rotate across CONFIG['mail_domains'] plus the
+        primary domain."""
+        env_domains = [d.strip().lower() for d in
+                       (os.environ.get('ZAI_MAIL_DOMAINS') or '').split(',') if d.strip()]
+        if env_domains:
+            return random.choice(env_domains)
         domains = [d.strip() for d in CONFIG.get('mail_domains') or [] if d.strip()]
         if self.domain not in domains:
             domains.insert(0, self.domain)
@@ -1774,6 +1789,10 @@ def _main(auto_result=None):
             logger.info(f"  retry {pr + 1}/{max_proxy_retries} — "
                         f"{route} email={email}")
 
+        # An unexpected empty result must still name a category, or the run is
+        # filed as a mystery "failed" with no reason.
+        if result is None and auto:
+            auto_result.update(_auto_result('failed', email))
         if result == 'CAPTCHA_NOT_LOADED':
             if auto:
                 auto_result.update(_auto_result('captcha_failed', email))
@@ -1847,8 +1866,8 @@ def _main(auto_result=None):
                         try:
                             plan = check_account_plan(token, log=logger.info)
                         except Exception as e:
-                            if auto:
-                                raise   # strict auto routes never retry directly
+                            if auto or env_on('ZAI_REQUIRE_PROXY'):
+                                raise   # strict routes never retry directly
                             # The plan is tied to the ACCOUNT, not the IP, so if the
                             # proxy died mid-check just retry directly.
                             logger.warning(f"plan check via proxy failed ({type(e).__name__}) "

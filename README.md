@@ -11,7 +11,7 @@ It exposes OpenAI- and Anthropic-compatible endpoints locally, pools multiple
 ZCode accounts behind one key, and can create new accounts for you on demand.
 Runs on **Windows (desktop exe)** and **Linux (headless VPS)**.
 
-**[Download latest](https://github.com/B3hnamR/AutoZcoder/releases/latest)** · [Release notes · 2.0.12](docs/releases/2.0.12.md) · [MIT license](LICENSE)
+**[Download latest](https://github.com/B3hnamR/AutoZcoder/releases/latest)** · [Release notes · 3.0.0](docs/releases/3.0.0.md) · [MIT license](LICENSE)
 
 [Quick start](#quick-start) · [Connect a client](#connect-a-client) · [Accounts](#adding-accounts) · [Features](#features) · [Documentation](#documentation) · [Security](#security-notes)
 
@@ -180,12 +180,18 @@ Generator and email setup: **[Account generator setup](docs/guides/SETUP.md)**.
 
 To transfer one account, use **Copy account for sharing**, then **Accounts →
 Import account → Validate and import** on the destination. A raw CLI JWT is
-also accepted. Exports contain the current bearer token and account/device
-metadata: treat them as credentials, not public support attachments. Sharing
-does not duplicate quota or entitlement and includes no renewal grant. Quota
-refresh is read-only; credential refresh can adopt a newer saved token but does
-not renew it. An expired or revoked token needs a fresh login/import if no newer
-credential is available; a JWT without declared expiry is not permanent.
+also accepted. Exports contain the current bearer token, its WorkOS refresh
+grant when one is known, and account/device metadata: treat them as
+credentials, not public support attachments. Sharing does not duplicate quota or
+entitlement.
+
+Credential renewal: when an account carries a WorkOS refresh grant, the gateway
+trades it for a new token in the background (`pool.allow_token_refresh`, on by
+default) near expiry, after a 401, and during the balance poll, then rewrites
+the snapshot. A spent or revoked grant is dropped so the account reports its
+401 honestly instead of retrying forever. Accounts without a grant can only
+adopt a newer saved token, so an expired one needs a fresh login/import; a JWT
+without declared expiry is not permanent.
 
 ## Generating accounts (optional)
 
@@ -302,6 +308,16 @@ beside its script.
 - Model overload (`529 / code 1305`) retries before output with backoff + jitter.
 - Authenticated client/admin routes, per-install keys, redacted captures (off by default).
 - One-click Cloudflare worker deploy with automatic Node.js install.
+
+### Bundled IP sources (generator)
+
+Besides the proxy pool, pinned proxy and direct connection, the generator can
+sign up through **Psiphon** (bundled client, regions of your choice) or your own
+**Surfshark** subscription (WireGuard manual setup, bundled wireproxy). Each
+signup takes the next connected region or location, and **New address**
+reconnects one of them for a different exit. Only the gateway's requests use a
+tunnel: no adapter, route or DNS change on the machine. See
+[`docs/releases/2.2.0.md`](docs/releases/2.2.0.md).
 
 ### Proxy pool (generator)
 

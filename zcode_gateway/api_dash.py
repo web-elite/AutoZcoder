@@ -28,6 +28,7 @@ import yaml
 from .config import Config, apply_config_env
 from .deps import admin_key, get_state, internal_or_admin
 from .logbuffer import LogBuffer
+from .peer import peer_is_local
 
 log = logging.getLogger("zcode_gateway.dash")
 
@@ -48,6 +49,7 @@ _EDITABLE = {
     "server.host": str, "server.port": int,
     "pool.strategy": str, "pool.min_balance_micro": int,
     "pool.refresh_lead_seconds": int, "pool.cooldown_seconds": int,
+    "pool.allow_token_refresh": bool,
     "pool.max_in_flight_per_account": int, "pool.acquire_wait_seconds": float,
     "pool.balance_poll_seconds": int, "pool.blocked_model_cooldown_seconds": int,
     "upstream.timeout_connect": float, "upstream.timeout_read": float,
@@ -359,6 +361,13 @@ async def dash_settings_put(request: Request, body: dict = Body(...),
                 if val.lower() not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
                     raise ValueError()
                 val = val.lower() in ("1", "true", "yes", "on")
+            elif cast is bool:
+                if not isinstance(val, bool):
+                    raise ValueError()
+            elif cast is int and (isinstance(val, bool) or not isinstance(val, (int, str))):
+                raise ValueError()
+            elif val is None or isinstance(val, (list, dict, bool)):
+                raise ValueError()
             else:
                 val = cast(val)
         except (TypeError, ValueError):
@@ -381,11 +390,12 @@ async def dash_settings_put(request: Request, body: dict = Body(...),
                                     detail=f"{dotted} must be one of: "
                                            f"{', '.join(c[0] for c in allowed)}")
             val = probe
-        if dotted in ("models.default", "models.default_anthropic") and not str(val).strip():
+        if dotted in ("models.default", "models.default_anthropic", "server.host",
+                      "accounts.dir", "accounts.pool_file") and not val.strip():
             raise HTTPException(status_code=400, detail=f"{dotted} cannot be empty")
-        if dotted == "pool.max_in_flight_per_account" and val < 1:
+        if dotted in ("pool.max_in_flight_per_account", "upstream.max_attempts") and val < 1:
             raise HTTPException(status_code=400,
-                                detail="pool.max_in_flight_per_account must be >= 1")
+                                detail=f"{dotted} must be >= 1")
         if dotted == "pool.balance_poll_seconds" and val < 10:
             raise HTTPException(status_code=400,
                                 detail="pool.balance_poll_seconds must be >= 10 "
@@ -421,6 +431,9 @@ async def dash_settings_put(request: Request, body: dict = Body(...),
         detail = "; ".join(".".join(map(str, error["loc"])) + ": " + error["msg"] for error in errors)
         raise HTTPException(400, "Configuration validation failed: " + (detail or "invalid setting")) from None
     if changed:
+        pacing = validated.models.pacing
+        if any(k.startswith("models.pacing.") for k in changed) and pacing.min_gap_ms > pacing.max_gap_ms:
+            raise HTTPException(400, "Shortest pause must be at most the longest pause")
         try:
             validated.server.validate_bind_policy()
         except RuntimeError as exc:
@@ -428,7 +441,13 @@ async def dash_settings_put(request: Request, body: dict = Body(...),
         await asyncio.to_thread(_atomic_write_yaml, cfg_path, raw)
     if "pool.strategy" in values:
         state.cfg.pool.strategy = validated.pool.strategy
-    return {"changed": changed, "restart_required": any(k != "pool.strategy" for k in changed)}
+    if "models.default_effort" in values:
+        # Reasoning effort is read per request from the live config, so no restart.
+        state.cfg.models.default_effort = validated.models.default_effort
+    if "pool.allow_token_refresh" in values:
+        state.cfg.pool.allow_token_refresh = validated.pool.allow_token_refresh
+    return {"changed": changed, "restart_required": any(
+        k not in ("pool.strategy", "models.default_effort", "pool.allow_token_refresh") for k in changed)}
 
 
 @router.post("/admin/dash/import")
@@ -1034,6 +1053,67 @@ def _qualifying_start_balance(raw: dict, now: float) -> bool:
     return False
 
 
+def _active_start_plan(raw: dict, now: float):
+    """The active, in-window Start Plan row, if one exists."""
+    for plan in raw.get("plans", []):
+        if not isinstance(plan, dict) or plan.get("status") != "active":
+            continue
+        pid = str(plan.get("plan_id") or "")
+        if not pid.startswith("zcode-v3-start-plan-") or pid in (
+                "zcode-v3-start-plan-1024", "zcode-v3-start-plan-500m"):
+            continue
+        if (plan.get("starts_at") or 0) > now:
+            continue
+        if plan.get("ends_at") and plan["ends_at"] <= now:
+            continue
+        return plan
+    return None
+
+
+def _qualifies_start(raw: dict, now: float) -> bool:
+    """Qualification gate: a spendable bucket, or a live Start Plan whose grant
+    has not been written as a bucket yet. An account that just found the plan
+    already active never gets a new grant and its bucket can lag the plan by a
+    few seconds. Manual registration has always accepted the plan alone; Auto
+    Generate must too, or a healthy account is filed as `no_plan`.
+
+    A bucket that exists but is drained (remaining 0) is NOT qualified — that is
+    an exhausted plan, not a lagging grant.
+    """
+    if _qualifying_start_balance(raw, now):
+        return True
+    plan = _active_start_plan(raw, now)
+    if not plan:
+        return False
+    owner = plan.get("user_plan_id")
+    return not any(isinstance(bucket, dict) and owner
+                   and bucket.get("user_plan_id") == owner for bucket in raw.get("balances", []))
+
+
+def _auto_plan_gate(plan_info, hinted: bool):
+    """Validate a plan read for an auto attempt.
+
+    Returns ``(plans, chosen_plan, error)``. An empty plan list with no error
+    means the caller should leave the account for the catch-up scan. A worker
+    that already verified a Start Plan keeps that evidence when this re-read
+    comes back empty or failed.
+    """
+    plan_info = plan_info if isinstance(plan_info, dict) else {}
+    plans = list(plan_info.get("plans") or [])
+    if not plans:
+        if not hinted:
+            return [], "", None
+        plans = ["zcode-v3-start-plan-0817"]
+    elif not hinted:
+        from plan_check import is_start_plan
+        if plan_info.get("code") != 0 or not any(is_start_plan(p) for p in plans):
+            return plans, "", {"qualified": False, "category": "no_plan",
+                               "error": "No active Starter/Start Plan verified"}
+    chosen = next((p for p in plans if str(p).startswith("zcode-v3-start-plan-")
+                   and p != "zcode-v3-start-plan-1024"), plans[0] if plans else "")
+    return plans, chosen, None
+
+
 def _generator(request: Request):
     return _generator_for_state(get_state(request))
 
@@ -1045,6 +1125,36 @@ def _start_daily_scheduler(state) -> None:
         log.warning("daily scheduler unavailable: %s", exc.detail)
     except Exception:
         log.exception("daily scheduler could not start")
+
+
+def _generator_data_dir(gen_dir: Path) -> Path:
+    from .paths import app_dir, base_dir
+    checkout = app_dir()
+    if getattr(sys, "frozen", False):
+        return (base_dir() if sys.platform == "win32" else checkout) / "generator-data"
+    if (checkout / ".git").is_dir() and gen_dir.resolve() == (checkout / "generator").resolve():
+        return base_dir() / "generator-data"
+    return gen_dir / "output"
+
+
+def _start_saved_vpns(state) -> None:
+    try:
+        gen_dir, _ = _find_zcodeauto(state)
+        if gen_dir is None:
+            return
+        path = _generator_data_dir(gen_dir) / "vpn.json"
+        if not path.is_file():
+            return
+        config = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            return
+        for kind in ("psiphon", "surfshark"):
+            options = config.get(kind)
+            if isinstance(options, dict) and options.get("enabled", True) and options.get("autoStart"):
+                _generator_for_state(state)
+                break
+    except Exception:
+        log.exception("generator: saved exit networks could not start")
 
 
 def _generator_for_state(state):
@@ -1088,6 +1198,10 @@ def _generator_for_state(state):
             email = info.get("email") or ""
             chat_token = info.get("chat_token") or ""
             auto = bool(info.get("auto_generate"))
+            # The worker's own plan check saw a live Start Plan; its balance read
+            # can still fail transiently right after the grant, so a re-read here
+            # must not override that evidence with empty data.
+            hinted = auto and bool(info.get("starter") or info.get("start_plan"))
             cancelled = info.get("cancelled", lambda: False)
             def cancelled_result():
                 return {"qualified": False, "category": "stopped", "error": "Registration cancelled"}
@@ -1146,14 +1260,18 @@ def _generator_for_state(state):
                         break
                     if attempt < 3:
                         _time.sleep(3)
-                if not plans:
-                    log.info("generator: %s has no plan after retries — leaving "
-                             "it for the catch-up scan", email)
-                    return
                 if auto:
-                    from plan_check import is_start_plan
-                    if not plan_info or plan_info.get("code") != 0 or not any(is_start_plan(p) for p in plans):
-                        return {"qualified": False, "category": "no_plan", "error": "No active Starter/Start Plan verified"}
+                    plans, chosen_plan, plan_error = _auto_plan_gate(plan_info, hinted)
+                    if plan_error:
+                        return plan_error
+                    if not plans:
+                        log.info("generator: %s has no plan after retries — leaving "
+                                 "it for the catch-up scan", email)
+                        return
+                    if not plan_info.get("plans"):
+                        log.info("generator: %s plan read empty; trusting the worker's "
+                                 "verified Start Plan", email)
+                        plan_info = {}
                     # The run must count a NEW provider identity, not a duplicate
                     # token for an account already loaded before registration.
                     from .zcode_detect import jwt_claims
@@ -1164,15 +1282,17 @@ def _generator_for_state(state):
                     prior = asyncio.run_coroutine_threadsafe(state.pool.find(ident), main_loop).result(timeout=20)
                     if prior:
                         return {"qualified": False, "category": "duplicate", "account_id": ident}
-                chosen_plan = next((p for p in plans
-                                    if str(p).startswith("zcode-v3-start-plan-")
-                                    and p != "zcode-v3-start-plan-1024"),
-                                   plans[0] if plans else "")
+                else:
+                    chosen_plan = next((p for p in plans
+                                        if str(p).startswith("zcode-v3-start-plan-")
+                                        and p != "zcode-v3-start-plan-1024"),
+                                       plans[0] if plans else "")
                 if auto and cancelled():
                     return cancelled_result()
                 if auto:
-                    if not _qualifying_start_balance(plan_info.get("raw") or {}, time.time()):
-                        return {"qualified": False, "category": "no_plan", "error": "No currently spendable Start Plan balance"}
+                    if not hinted:
+                        if not _qualifies_start(plan_info.get("raw") or {}, time.time()):
+                            return {"qualified": False, "category": "no_plan", "error": "No active Start Plan or spendable balance"}
                     run_id, attempt_id = info.get("auto_run_id"), info.get("auto_attempt_id")
                     if not run_id or not attempt_id:
                         return {"qualified": False, "category": "registration_error", "error": "Registration receipt identity missing"}
@@ -1186,7 +1306,7 @@ def _generator_for_state(state):
                         state.pool.upsert(account), main_loop)
                     fut.result(timeout=30)
                     if auto:
-                        checked = asyncio.run_coroutine_threadsafe(_verify_auto_account(account.id, plan_info.get("raw")), main_loop).result(timeout=20)
+                        checked = asyncio.run_coroutine_threadsafe(_verify_auto_account(account.id, plan_info.get("raw"), hinted), main_loop).result(timeout=20)
                         if not checked:
                             return {"qualified": False, "category": "registration_error",
                                     "error": "Saved account needs a fresh successful plan/quota check"}
@@ -1235,29 +1355,26 @@ def _generator_for_state(state):
             with request_route(info.get("registration_proxy") or None):
                 return _register_account_impl(info)
 
-        async def _verify_auto_account(account_id: str, raw: dict) -> bool:
+        async def _verify_auto_account(account_id: str, raw: dict, hint: bool = False) -> bool:
             account = await state.pool.find(account_id)
-            if account is None or not isinstance(raw, dict):
+            if account is None:
                 return False
             now = time.time()
+            if not isinstance(raw, dict) or not raw.get("plans"):
+                account.plan_checked_at = now
+                account.has_plan = bool(hint)
+                return bool(hint)
             from .quota import parse_balance
             plans, quotas = parse_balance(raw, now)
             account.notes.update(plans=plans, quotas=quotas)
             account.notes.pop("quota_check_error", None)
             account.balance_checked_at = account.plan_checked_at = now
             account.has_plan = account.plan_active(now)
-            return _qualifying_start_balance(raw, now)
+            return _qualifies_start(raw, now) or hint
 
         from .generator import GeneratorManager, claim_result_landed
         gc = state.cfg.generator
-        # Portable Windows installs share the bootstrap's writable data root.
-        # Linux installs keep worker data in the installer-managed directory.
-        from .paths import app_dir, base_dir
-        checkout = app_dir()
-        data_dir = ((base_dir() if sys.platform == "win32" else checkout) / "generator-data"
-                    if getattr(sys, "frozen", False)
-                    else base_dir() / "generator-data" if (checkout / ".git").is_dir() and gen_dir.resolve() == (checkout / "generator").resolve()
-                    else gen_dir / "output")
+        data_dir = _generator_data_dir(gen_dir)
         mgr = GeneratorManager(gen_dir, on_account=register_account,
                                python_exe=getattr(gc, "python_exe", ""),
                                data_dir=data_dir,
@@ -1353,7 +1470,7 @@ def _generator_for_state(state):
             legacy100 = bool(gc.claim) and not legacy500
             mgr.claim = legacy100
             mgr.claim500 = legacy500
-            mgr.claim_start = bool(getattr(gc, "claim_start", True)) and not (legacy100 or legacy500)
+            mgr.claim_start = gc.claim_start and not (legacy100 or legacy500)
         mgr._invite_code = gc.invite_code
         if gc.captcha in ("auto", "manual", "ai", "classic") and not mgr._has_saved_options:
             # First run only (no generator_options.json yet): seed from
@@ -1397,6 +1514,12 @@ def _generator_for_state(state):
         _start_referral_finisher(mgr)
         state.claim_scheduler = scheduler
         scheduler.start()
+        # Connect the bundled exit networks the user asked to start with the
+        # gateway. It runs once per manager, and never blocks this call.
+        try:
+            mgr.autostart_vpns()
+        except Exception:
+            log.exception("generator: exit networks could not start")
     return mgr
 
 
@@ -1555,6 +1678,81 @@ async def generator_options(request: Request, body: dict = Body(...),
     return {"ok": True}
 
 
+# ---- bundled exit networks (IP source: Psiphon / Surfshark) ---------------- #
+
+# Each region is a local SOCKS port the generator sends signups through. The
+# dashboard uses these to choose regions, connect, see the exit address, and
+# get a new address. Both clients are bundled, so a running session may drive
+# them; the admin key still gates every call.
+
+def _vpn_pool(request: Request, kind: str):
+    mgr = _generator(request)
+    if kind == "psiphon":
+        return mgr.psiphon
+    if kind == "surfshark":
+        return mgr.surfshark
+    raise HTTPException(404, "unknown exit network")
+
+
+async def _vpn_action(fn, *args) -> dict:
+    try:
+        return await asyncio.to_thread(fn, *args)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.get("/admin/dash/generator/vpn/status")
+async def generator_vpn_status(request: Request, key: str = Depends(admin_key)) -> dict:
+    return _generator(request).vpn_status()
+
+
+@router.post("/admin/dash/generator/vpn/surfshark/keys")
+async def generator_surfshark_keys(request: Request, body: dict = Body(...),
+                                   key: str = Depends(admin_key)) -> dict:
+    pool = _vpn_pool(request, "surfshark")
+    return await _vpn_action(pool.set_keys, str(body.get("privateKey") or ""),
+                             str(body.get("publicKey") or ""))
+
+
+@router.post("/admin/dash/generator/vpn/surfshark/keys/remove")
+async def generator_surfshark_keys_remove(request: Request,
+                                          key: str = Depends(admin_key)) -> dict:
+    return await _vpn_action(_vpn_pool(request, "surfshark").clear_keys)
+
+
+@router.post("/admin/dash/generator/vpn/{kind}/connect")
+async def generator_vpn_connect(request: Request, kind: str,
+                                key: str = Depends(admin_key)) -> dict:
+    return await _vpn_action(_vpn_pool(request, kind).connect)
+
+
+@router.post("/admin/dash/generator/vpn/{kind}/disconnect")
+async def generator_vpn_disconnect(request: Request, kind: str,
+                                   key: str = Depends(admin_key)) -> dict:
+    return await _vpn_action(_vpn_pool(request, kind).disconnect)
+
+
+@router.post("/admin/dash/generator/vpn/{kind}/update")
+async def generator_vpn_update(request: Request, kind: str,
+                               key: str = Depends(admin_key)) -> dict:
+    return await _vpn_action(_vpn_pool(request, kind).update)
+
+
+@router.post("/admin/dash/generator/vpn/{kind}/renew")
+async def generator_vpn_renew(request: Request, kind: str, body: dict = Body(...),
+                              key: str = Depends(admin_key)) -> dict:
+    region = str(body.get("region") or "").strip()
+    if not region:
+        raise HTTPException(400, "region is required")
+    return await _vpn_action(_vpn_pool(request, kind).renew, region)
+
+
+@router.post("/admin/dash/generator/vpn/{kind}/settings")
+async def generator_vpn_settings(request: Request, kind: str, body: dict = Body(...),
+                                 key: str = Depends(admin_key)) -> dict:
+    return await _vpn_action(_vpn_pool(request, kind).set_settings, body)
+
+
 @router.post("/admin/dash/generator/start")
 async def generator_start(request: Request, body: dict = Body(default={}),
                           key: str = Depends(admin_key)) -> dict:
@@ -1575,44 +1773,51 @@ async def generator_start(request: Request, body: dict = Body(default={}),
 
 @router.get("/admin/dash/generator/auto")
 async def auto_generate_status(request: Request, key: str = Depends(admin_key)) -> dict:
-    controller = _generator(request).auto_generate
-    return _auto_public(controller)
+    manager = _generator(request)
+    return _auto_public(manager.auto_generate, manager)
 
 
-def _auto_public(controller) -> dict:
+def _auto_public(controller, manager=None) -> dict:
     status = controller.status()
     cooldowns = [value for value in status.get("cooldowns", []) if value > 0]
-    return {"config": controller.config(), "status": {
+    body = {"config": controller.config(), "status": {
         **status, "state": status.get("status", "idle"),
         "launched": status.get("attempts", 0), "completed": status.get("completed_attempts", 0),
         "cooling": len(cooldowns), "remaining_cooldown_seconds": min(cooldowns) if cooldowns else 0,
     }}
+    if manager is not None:
+        body.update(ip_exits=manager.ip_exit_choices(), pin_set=bool(manager.pin_proxy),
+                    pool_available=int(manager._pool_available()),
+                    workers=manager.auto_worker_public(status.get("id", "")))
+    return body
 
 
 @router.put("/admin/dash/generator/auto")
 async def auto_generate_save(request: Request, body: dict = Body(...), key: str = Depends(admin_key)) -> dict:
-    controller = _generator(request).auto_generate
+    manager = _generator(request)
+    controller = manager.auto_generate
     try:
         await asyncio.to_thread(controller.save_config, body)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     except OSError:
         raise HTTPException(500, "Could not save Auto Generate configuration") from None
-    return _auto_public(controller)
+    return _auto_public(controller, manager)
 
 
 @router.post("/admin/dash/generator/auto/{action}")
 async def auto_generate_action(request: Request, action: str, key: str = Depends(admin_key)) -> dict:
     if action not in ("start", "pause", "resume", "stop"):
         raise HTTPException(404, "Unknown Auto Generate action")
-    controller = _generator(request).auto_generate
+    manager = _generator(request)
+    controller = manager.auto_generate
     try:
         await asyncio.to_thread(getattr(controller, action))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from None
     except OSError:
         raise HTTPException(500, "Auto Generate state could not be saved") from None
-    return _auto_public(controller)
+    return _auto_public(controller, manager)
 
 
 def _env_setup_shared(request: Request):
@@ -1678,6 +1883,46 @@ async def generator_shutdown(request: Request, key: str = Depends(admin_key)) ->
     if manager is not None:
         await asyncio.to_thread(manager.shutdown)
     return {"ok": True}
+
+
+@router.post("/admin/dash/generator/workers/details/{action}")
+async def generator_worker_details(request: Request, action: str,
+                                   body: dict = Body(...), key: str = Depends(admin_key)):
+    if action not in ("log", "open-log", "password"):
+        raise HTTPException(404, "Unknown worker action")
+    if action != "log" and not peer_is_local(request):
+        raise HTTPException(403, "This action is available on the gateway computer only")
+    manager = _generator(request)
+    name = body.get("name")
+    worker = manager.workers.get(name) if isinstance(name, str) else None
+    if worker is None or worker.created != body.get("created"):
+        raise HTTPException(404, "Worker is no longer available")
+    if worker.state != "exited" or not worker.done.is_set():
+        raise HTTPException(409, "Wait for the worker to finish")
+    headers = {"Cache-Control": "no-store"}
+    if action == "password":
+        if not worker.signup_password:
+            raise HTTPException(404, "No signup password was saved for this worker")
+        return JSONResponse({"password": worker.signup_password}, headers=headers)
+
+    log_file = worker.env.get("ZAI_LOG_FILE")
+    if not log_file:
+        raise HTTPException(404, "Worker log file is unavailable")
+    path = Path(log_file).resolve()
+    log_dir = (manager.data_dir / "logs" / "workers").resolve()
+    if path.parent != log_dir or path.suffix.lower() != ".log" or not path.is_file():
+        raise HTTPException(404, "Worker log file is unavailable")
+    try:
+        if action == "open-log":
+            if sys.platform != "win32":
+                raise HTTPException(400, "Opening the file directly requires Windows. Use Copy log instead.")
+            opener = getattr(os, "startfile")
+            await asyncio.to_thread(opener, str(path))
+            return JSONResponse({"opened": True}, headers=headers)
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
+    except OSError:
+        raise HTTPException(409, "Could not access the worker log file") from None
+    return JSONResponse({"log": text}, headers=headers)
 
 
 @router.post("/admin/dash/generator/workers/remove")
@@ -1819,9 +2064,31 @@ async def generator_proxies_countries(request: Request, key: str = Depends(admin
 
 # ---- Edge Relays (Cloudflare, Vercel, Deno, Netlify) ------------------------ #
 
+def vpn_relay_exits(state) -> list[dict]:
+    """Connected bundled exits, usable as relays through their socks port."""
+    mgr = getattr(state, "generator", None)
+    if mgr is None:
+        return []
+    from .generator import REGION_NAMES
+    rows = []
+    for kind, pool in (("psiphon", getattr(mgr, "psiphon", None)),
+                       ("surfshark", getattr(mgr, "surfshark", None))):
+        if pool is None:
+            continue
+        for inst in pool.ready():
+            if kind == "psiphon":
+                label = f"Psiphon \u00b7 {REGION_NAMES.get(inst.region, inst.region)} ({inst.region})"
+            else:
+                label = f"Surfshark \u00b7 {pool.pick_label(inst)}"
+            rows.append({"key": f"{kind}:{inst.region}", "label": label,
+                         "url": f"socks5://127.0.0.1:{inst.port}"})
+    return rows
+
+
 def _relay_mgr(request: Request):
     state = get_state(request)
     mgr = getattr(state, "relay_manager", None)
+    resolver = lambda: vpn_relay_exits(state)
     if mgr is None:
         from .relay_manager import RelayManager
         data_dir = (Path(state.cfg.accounts.dir).resolve().parent / "generator-data") if state.cfg.accounts.dir else Path("./generator-data")
@@ -1829,6 +2096,7 @@ def _relay_mgr(request: Request):
         state.relay_manager = mgr
         if getattr(state, "client", None) and not getattr(state.client, "relay_manager", None):
             state.client.relay_manager = mgr
+    mgr.set_vpn_resolver(resolver)
     return mgr
 
 
@@ -1900,11 +2168,12 @@ async def save_relay_settings(request: Request, body: dict = Body(...),
     enabled = body.get("enabled")
     active_id = body.get("active_id")
     strategy = body.get("strategy")
+    vpn_ids = body.get("vpn_ids")
     try:
         # update_options ends in a relays.json write — off the loop
         st = await asyncio.to_thread(
             mgr.update_options, models=models, enabled=enabled,
-            active_id=active_id, strategy=strategy)
+            active_id=active_id, strategy=strategy, vpn_ids=vpn_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"ok": True, "settings": st}

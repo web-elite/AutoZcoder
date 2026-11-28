@@ -8,6 +8,7 @@ import logging
 import os
 import threading
 import time
+from bisect import bisect_right
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -310,7 +311,7 @@ class Router:
 
     def __init__(self, cfg: PoolConfig) -> None:
         self.cfg = cfg
-        self._rr_index = 0
+        self._rr_last: dict[str | None, str] = {}
 
     def candidates(self, accounts: Iterable[Account], exclude: set[str],
                    require_paid: bool = False, model: str | None = None) -> list[Account]:
@@ -355,7 +356,7 @@ class Router:
             pool = sorted(pool, key=remaining)
         return pool
 
-    def pick(self, accounts: list[Account]) -> Account | None:
+    def pick(self, accounts: list[Account], *, model: str | None = None) -> Account | None:
         if not accounts:
             return None
         cap = self.cfg.max_in_flight_per_account
@@ -368,8 +369,11 @@ class Router:
 
         strategy = self.cfg.strategy
         if strategy == "round_robin":
-            acc = under_cap[self._rr_index % len(under_cap)]
-            self._rr_index = (self._rr_index + 1) % len(under_cap)
+            ordered = sorted(under_cap, key=lambda a: a.id)
+            previous = self._rr_last.get(model)
+            index = bisect_right(ordered, previous, key=lambda a: a.id) if previous is not None else 0
+            acc = ordered[index % len(ordered)]
+            self._rr_last[model] = acc.id
             return acc
         if strategy == "least_recently_used":
             return min(under_cap, key=lambda a: a.last_used)
@@ -381,7 +385,7 @@ class Router:
 
     def acquire(self, accounts: list[Account], exclude: set[str],
                 require_paid: bool = False, model: str | None = None) -> Account | None:
-        acc = self.pick(self.candidates(accounts, exclude, require_paid, model))
+        acc = self.pick(self.candidates(accounts, exclude, require_paid, model), model=model)
         if acc is not None:
             acc.in_flight += 1
             acc.last_used = time.time()
@@ -626,7 +630,7 @@ class PoolManager:
                 if candidates and affinity_key and not only_id:
                     acc = self._affine_candidate(candidates, affinity_key)
                 if acc is None:
-                    acc = self._router.pick(candidates)
+                    acc = self._router.pick(candidates, model=model)
                 if acc is not None:
                     acc.in_flight += 1
                     acc.last_used = time.time()
@@ -1000,6 +1004,16 @@ class PoolManager:
 
     async def snapshot(self) -> dict:
         accounts = await self.all()
+        # A cooldown that has run out is usable again, but nothing flips the
+        # state until the account is next used. Flip it at read time, or the
+        # dashboard shows "cooling" for accounts that route fine and the cards
+        # stop adding up (ready + cooling > accounts).
+        now = time.time()
+        for account in accounts:
+            if (account.state is AccountState.COOLING and account.cooldown_until
+                    and account.cooldown_until <= now):
+                account.state = AccountState.READY
+                account.cooldown_until = 0.0
         counts: dict[str, int] = {}
         for a in accounts:
             counts[a.state.value] = counts.get(a.state.value, 0) + 1

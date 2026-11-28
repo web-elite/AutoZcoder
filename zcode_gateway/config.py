@@ -256,23 +256,27 @@ class UpstreamConfig(BaseModel):
 
 
 class PoolConfig(BaseModel):
-    strategy: str = "drain_first"
+    # round_robin spreads load across the whole pool instead of draining one
+    # account at a time: surviving accounts keep a warm path for every model.
+    strategy: str = "round_robin"
     min_balance_micro: int = 0
     refresh_lead_seconds: int = Field(default=600, ge=0)
+    # Use a saved WorkOS refresh grant to mint a replacement access token when
+    # one exists. Off = adopt externally captured tokens only.
+    allow_token_refresh: bool = True
     cooldown_seconds: int = Field(default=30, ge=0)
     # 0 would make every account permanently busy — all requests 503 forever
     max_in_flight_per_account: int = Field(default=4, ge=1)
     # how long acquire() waits for an in-flight slot when every eligible
     # account is at max_in_flight_per_account (0 = fail immediately)
     acquire_wait_seconds: float = Field(default=5.0, ge=0)
-    balance_poll_seconds: int = Field(default=300, ge=10)
+    balance_poll_seconds: int = Field(default=60, ge=10)
     # 405/code 3012 "unusual activity": park this model on the offending
     # account for this long, then rotate. Per model, so other models on the
     # same account stay usable. 15 minutes by default.
     blocked_model_cooldown_seconds: int = 900
-    # Keep a conversation on the account that served its first turn, so later
-    # turns still see the earlier ones and the upstream prompt cache stays
-    # warm. Keyed by the client's session id; 0 disables it.
+    # Prefer the same account for related turns to improve prompt cache reuse.
+    # Zero disables affinity.
     conversation_affinity_seconds: int = Field(default=600, ge=0)
 
 
@@ -375,7 +379,7 @@ class GeneratorConfig(BaseModel):
     # claimed from the billing preview after signup, and the marketing feed is
     # also walked for Global/Weekend Build cards (their ids rotate per drop).
     # This is the default path now.
-    claim_start: bool = True
+    claim_start: bool = False
     invite_code: str = "MT9GNDQ8"      # referral code to claim ('' = off)
     # Prefetch Aliyun captcha tickets for claims, so the signup POST does not
     # wait 10-30 s for a mint while the browser idles. Tokens die 90 s after

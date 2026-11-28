@@ -7,30 +7,10 @@ import { card, table, toolbar, searchBox, button, stateBadge, badge, metric } fr
 import { num, duration, dateTime, relative, parseTime } from "../core/format.js";
 import { can, gate } from "../core/caps.js";
 import { importJwt, copyAccountForSharing, copyAllAccountsForSharing } from "./accounts-jwt.js";
-import { createClaimBatch } from "./claim-batch.js";
 import { aggregateModelQuotas } from "./model-quota.js";
 import { t } from "../core/i18n.js";
 
 let query = "";
-
-// Claims and signups need SOCKS proxies; an empty pool is the usual reason a
-// claim fails, so it is worth a glance from here.
-const socksBadge = el("span", { class: "badge", hidden: true });
-
-async function paintSocks() {
-  try {
-    const r = await api.get("/admin/dash/proxy/socks_ready");
-    const n = r.socks_ready;
-    socksBadge.hidden = false;
-    socksBadge.textContent = n < 0 ? t("acc.pool.unknown") : t("acc.pool.ready", { n });
-    socksBadge.className = "badge" + (n < 0 ? "" : n === 0 ? " badge--err" : " badge--ok");
-    socksBadge.title = r.last_verified_at
-      ? t("acc.pool.last_verified", { when: relative(parseTime(r.last_verified_at)) })
-      : t("acc.pool.never_verified");
-  } catch (_) {
-    socksBadge.hidden = true;        // no generator configured: not an error
-  }
-}
 
 /* ------------------------------------------------------------- cells ---- */
 
@@ -191,8 +171,8 @@ async function importFromApp(reload) {
 async function reloadPool(reload) {
   try {
     const r = await api.post("/admin/pool/reload");
-    toast(t("acc.pool.reloaded", { n: r.loaded, added: r.added }), "ok");
-    reload();
+    await reload(true);
+    toast("Pool reloaded · " + r.loaded + " read, " + r.added + " new, " + (r.updated ?? 0) + " updated", "ok");
   } catch (e) { toast("reload: " + e.message, "err"); }
 }
 
@@ -302,7 +282,7 @@ function applyFilter(root) {
   if (none) none.hidden = !(total > 0 && shown === 0);
 }
 
-function render(root, accounts, pool, reload, batch, signal, campaign = {}, models) {
+function render(root, accounts, pool, reload, signal, actions, campaign = {}, models) {
   const rows = accounts.map((a) => Object.assign(a, {
     __searchText: [a.email, a.id, a.state, a.source, ...(a.capped_models || [])]
       .filter(Boolean).join(" ").toLowerCase(),
@@ -343,29 +323,30 @@ function render(root, accounts, pool, reload, batch, signal, campaign = {}, mode
     button({ label: t("acc.btn.import"), icon: "key", onClick: () => importJwt(reload) }),
     button({ label: t("acc.btn.copy_all"), icon: "copy", onClick: copyAllAccountsForSharing }),
     // No desktop Zcode app on a server: the import would always 404.
-    gate(button({ label: t("acc.btn.import_app"), icon: "copy", onClick: () => importFromApp(reload) }), "import_from_app"),
-    button({ label: t("acc.btn.reload"), icon: "refresh", onClick: () => reloadPool(reload) }),
-    button({ label: t("acc.btn.quotas"), icon: "chart", onClick: async (event) => {
-      const control = event.currentTarget;
-      control.disabled = true;
+    gate(button({ label: "Import from app", icon: "copy", onClick: () => importFromApp(reload) }), "import_from_app"),
+    button({ label: "Reload pool", icon: "refresh", onClick: () => actions.run(async () => {
+      await reloadPool(reload);
+    }) }),
+    button({ label: "Refresh quotas", icon: "chart", onClick: () => actions.run(async () => {
       let failed = 0;
       try {
         // Sequential checks avoid turning a transient upstream block into a
         // burst of requests from every account at once.
         for (const account of accounts) {
           try {
-            const result = await api.post("/admin/accounts/" + encodeURIComponent(account.id) + "/balance");
+            if (signal.aborted) return;
+            const result = await api.post("/admin/accounts/" + encodeURIComponent(account.id) + "/balance", undefined, { signal });
             if (result.quota_check_error) failed++;
           } catch (_) { failed++; }
         }
-        toast(failed ? t("acc.quotas.failed", { n: failed }) : t("acc.quotas.all_ok"),
-              failed ? "warn" : "ok");
-        await reload();
-      } finally { control.disabled = false; }
-    } }),
-    button({ label: t("acc.btn.purge"), variant: "danger", title:
-      t("acc.btn.purge_help"), onClick: () => purgeDrained(reload) }),
-    socksBadge,
+        if (signal.aborted) return;
+        await reload(true);
+        toast(!accounts.length ? "No accounts to refresh" : failed ? failed + " quota check(s) failed; last known values kept" : "All quotas refreshed",
+               failed ? "warn" : "ok");
+      } catch (error) { if (!signal.aborted) toast("Could not reload quota results: " + error.message, "err"); }
+    }) }),
+    button({ label: "Purge drained", variant: "danger", title:
+      "Remove accounts with 0 tokens left on every model", onClick: () => purgeDrained(reload) }),
   ], searchBox({
     placeholder: t("acc.search.ph"),
     value: query,
@@ -432,28 +413,44 @@ function render(root, accounts, pool, reload, batch, signal, campaign = {}, mode
     flush: true,
   });
 
-  fill(root, el("div", { class: "stack" }, [summary, quotaTotals, bar, batch.node, tableCard]));
+  fill(root, el("div", { class: "stack" }, [summary, quotaTotals, bar, tableCard]));
   applyFilter(root);
-  paintSocks();
 }
 
 export async function mount({ root, signal }) {
-  const batch = createClaimBatch({ signal, compact: true });
-  const load = async () => {
-    if (signal.aborted) return;
+  const actions = {
+    busy: false,
+    async run(action) {
+      if (actions.busy) return;
+      actions.busy = true;
+      const controls = Array.from(root.querySelectorAll("button")).filter(
+        control => ["Refresh quotas", "Reload pool"].includes(control.textContent.trim()));
+      for (const control of controls) control.disabled = true;
+      try { await action(); }
+      finally {
+        actions.busy = false;
+        for (const control of controls) control.disabled = false;
+      }
+    },
+  };
+  let requestVersion = 0;
+  const load = async (force = false) => {
+    if (signal.aborted || (actions.busy && !force)) return;
+    const version = ++requestVersion;
     const [accs, pool, campaign] = await Promise.all([
       api.get("/admin/accounts", { signal }),
       api.get("/admin/pool/state", { signal }),
       api.get("/admin/accounts/campaign_window", { signal }).catch(() => ({ gate: false })),
     ]);
-    if (signal.aborted) return;
+    if (signal.aborted || version !== requestVersion || (actions.busy && !force)) return;
     // Do not rebuild while the user is typing in the filter box.
     const active = document.activeElement;
-    if (active && active.type === "search" && root.contains(active)) {
+    const filtering = active && active.type === "search" && root.contains(active);
+    if (!force && filtering) {
       return;
     }
-    render(root, accs.accounts || [], pool || {}, load, batch, signal, campaign || {}, accs.models);
-    batch.refresh();
+    render(root, accs.accounts || [], pool || {}, load, signal, actions, campaign || {}, accs.models);
+    if (filtering) root.querySelector('input[type="search"]')?.focus({ preventScroll: true });
   };
 
   await load();

@@ -116,6 +116,22 @@ def test_auto_forces_one_signup_and_one_email(worker, monkeypatch, capsys,
     worker.ns['pick_verified_proxy'].assert_not_called()
 
 
+def test_auto_claims_even_when_a_plan_already_looks_active(worker, capsys):
+    # Signups no longer grant the Start Plan, so the claim always runs; the
+    # old "already active" shortcut skipped it for every fresh account.
+    worker.plan.check_account_plan.return_value = {
+        'starter': True, 'plans': ['zcode-v3-start-plan-0817']}
+    assert run(worker, capsys)['category'] == 'generated'
+    worker.claim.claim_start.assert_called_once()
+    messages = [call.args[0] for call in worker.ns['logger'].info.call_args_list]
+    assert not any('campaign claim skipped' in str(message) for message in messages)
+
+
+def test_auto_still_claims_when_no_plan_is_active(worker, capsys):
+    assert run(worker, capsys)['category'] == 'generated'
+    worker.claim.claim_start.assert_called_once()
+
+
 def test_direct_overrides_inherited_proxy_and_pool(worker, monkeypatch, capsys):
     worker.ns['CURRENT_PROXY'] = 'socks5://inherited.test:1080'
     monkeypatch.setenv('ZAI_PROXY', worker.ns['CURRENT_PROXY'])

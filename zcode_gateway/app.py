@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
 from .api_admin import router as admin_router
+from .api_dash import vpn_relay_exits
 from .api_anthropic import router as anthropic_router
 from .api_dash import router as dash_router
 from .api_health import router as health_router
@@ -90,6 +91,10 @@ async def lifespan(app: FastAPI):
     from .relay_manager import RelayManager
     relays_data_dir = (Path(cfg.accounts.dir).resolve().parent / "generator-data") if cfg.accounts.dir else Path("./generator-data")
     relay_manager = RelayManager(data_dir=relays_data_dir)
+    # connected VPN exits double as relays; the resolver reads the generator
+    # lazily because that manager does not exist yet
+    relay_manager.set_vpn_resolver(
+        lambda: vpn_relay_exits(app.state.app_state))
     # relay health loop: background ping every 5 minutes; failures feed the
     # rotation cooldown and the dashboard health column
     try:
@@ -167,6 +172,9 @@ async def lifespan(app: FastAPI):
         if cfg.claims.daily_enabled:
             from .api_dash import _start_daily_scheduler
             _start_daily_scheduler(app.state.app_state)
+        else:
+            from .api_dash import _start_saved_vpns
+            _start_saved_vpns(app.state.app_state)
         yield
     finally:
         scheduler = getattr(app.state.app_state, "claim_scheduler", None)

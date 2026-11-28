@@ -28,7 +28,7 @@
 #   5. the account generator's environment: a private Python venv with its
 #      packages (playwright, ddddocr, opencv, …) and Chromium + the system
 #      libraries it needs, so the dashboard never shows "Environment Setup";
-#      plus Node.js 22 + wrangler for the Cloudflare mail worker
+#      plus Node.js LTS (>= 22) + wrangler for the Cloudflare mail worker
 #   6. firewall check, then TLS. DEFAULT = Let's Encrypt certificate for the
 #      server's bare IP (shortlived profile, auto-renewed by a systemd timer),
 #      so the dashboard opens at https://<ip>:8443/dash with no warning.
@@ -146,6 +146,8 @@ resolve_config() {
         elif [[ -n "$SAVED_DOMAIN" ]]; then SAVED_SSL_MODE=domain
         else SAVED_SSL_MODE=ip; fi
     fi
+    # an explicit ZGW_SSL_MODE skips the TLS prompt; a saved one is only its default
+    ZGW_SSL_MODE_ENV="${ZGW_SSL_MODE:-}"
     ZGW_SSL_MODE="${ZGW_SSL_MODE:-${SAVED_SSL_MODE}}"
     if [[ "$SAVED_ACME_HOST" == __legacy__ ]]; then
         SAVED_ACME_HOST=""
@@ -154,6 +156,10 @@ resolve_config() {
             ip) SAVED_ACME_HOST="$SAVED_SERVER_IP" ;;
         esac
     fi
+    if [[ ! "$ZGW_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$ZGW_PORT < 1 || 10#$ZGW_PORT > 65535 )); then
+        fail "ZGW_PORT must be a TCP port number 1-65535 (got '${ZGW_PORT}')"
+    fi
+    ZGW_PORT="$((10#$ZGW_PORT))"
     PAUSE_UNITS="${ZGW_PAUSE_UNITS-${SAVED_PAUSE_UNITS}}"
     ZGW_FROM_SOURCE="${ZGW_FROM_SOURCE:-${SAVED_FROM_SOURCE}}"
     CERT_DIR="${ZGW_INSTALL_DIR}/certs"
@@ -384,7 +390,7 @@ install_pkgs() (
         fedora|amzn|rhel|almalinux|rocky|ol|centos)
                                     "${clean[@]}" dnf install -y -q "$@" ;;
         arch|manjaro|parch)         "${clean[@]}" pacman -Sy --noconfirm "$@" ;;
-        opensuse-*)                 "${clean[@]}" zypper -q install -y "$@" ;;
+        opensuse-*|sles)            "${clean[@]}" zypper -q install -y "$@" ;;
         *)                          "${clean[@]}" apt-get update -qq && "${clean[@]}" apt-get install -y -qq -o Dpkg::Use-Pty=0 "$@" ;;
     esac
 )
@@ -393,13 +399,12 @@ host_for_display() { echo "${ZGW_DOMAIN:-${SERVER_IP:-${ZGW_SERVER_IP:-<server-i
 # the port the gateway itself listens on (https: public port; http: loopback only)
 gw_port() { [[ "${SSL_SCHEME:-https}" == "https" ]] && echo "${ZGW_PORT}" || echo 8788; }
 gw_health_url() {
-    if [[ "${SSL_SCHEME:-https}" == "https" ]]; then echo "https://127.0.0.1:$(gw_port)/health"
-    else echo "http://127.0.0.1:8788/health"; fi
+    cfg_yaml health
 }
 
 # All config access uses YAML, including updates: key order, indentation and
 # flow-style mappings must not decide whether an existing install is retained.
-cfg_yaml() { # cfg_yaml validate|admin|client|has|set [section key [yaml-value]]
+cfg_yaml() { # cfg_yaml validate|admin|client|health|has|set [section key [yaml-value]]
     system_python - "${ZGW_INSTALL_DIR}/config.yaml" "$@" <<'PY'
 import os
 from pathlib import Path
@@ -435,6 +440,15 @@ try:
         print(admin)
     elif action == "client":
         print(clients[0]["key"])
+    elif action == "health":
+        port = server.get("port", 8788)
+        if isinstance(port, str) and port.isascii() and port.isdecimal():
+            port = int(port)
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("invalid server.port")
+        scheme = "https" if server.get("tls_cert") and server.get("tls_key") else "http"
+        host = "[::1]" if server.get("host") in ("::", "::1") else "127.0.0.1"
+        print(f"{scheme}://{host}:{port}/health")
     elif action == "has":
         section, key = sys.argv[3:5]
         sys.exit(0 if key in data.get(section, {}) else 1)
@@ -713,22 +727,29 @@ PY
 }
 
 # sets TLS_MODE_CHOICE (ip|domain|self|none); a global rather than command
-# substitution so a domain typed at the prompt is kept
+# substitution so a domain typed at the prompt is kept. Asks only when no mode
+# is set; the saved mode (if any) is the default answer.
 choose_tls_mode() {
     TLS_MODE_CHOICE="${ZGW_SSL_MODE:-ip}"
     if [[ "$TTY_OK" != "1" || -n "${ZGW_SSL_MODE}" ]]; then return 0; fi
+    local def=2
+    case "${SAVED_SSL_MODE:-}" in domain) def=1 ;; self) def=3 ;; none) def=4 ;; esac
     echo
     echo -e "${bold}Choose the TLS certificate setup:${plain}"
     echo -e "${green} 1.${plain} Let's Encrypt — domain   (90 days; needs port 80 + a DNS A record)"
     echo -e "${green} 2.${plain} Let's Encrypt — this server's IP  ${bold}(recommended: https://<ip>, no warning)${plain}"
     echo -e "${green} 3.${plain} Self-signed             (any IP, no port 80 — one browser warning)"
     echo -e "${green} 4.${plain} No TLS                  (gateway stays on 127.0.0.1; bring your own proxy / tunnel)"
-    local c; c="$(ask "Choose an option [2]: " 2)"
+    local c; c="$(ask "Choose an option [${def}]: " "$def")"
     case "$c" in
-        1) until is_domain "${ZGW_DOMAIN:-}"; do
-               ZGW_DOMAIN="$(ask "Domain name: " "")"
-               [[ -z "$ZGW_DOMAIN" ]] && fail "a domain is required for option 1"
+        1) local typed
+           typed="$(ask "Domain name${ZGW_DOMAIN:+ [${ZGW_DOMAIN}]}: " "${ZGW_DOMAIN:-}")"
+           until is_domain "$typed"; do
+               [[ -n "$typed" ]] || fail "a domain is required for option 1"
+               warn "'${typed}' is not a domain name (example: gw.example.com)"
+               typed="$(ask "Domain name: " "")"
            done
+           ZGW_DOMAIN="$typed"
            TLS_MODE_CHOICE=domain ;;
         2) TLS_MODE_CHOICE=ip ;;
         3) TLS_MODE_CHOICE=self ;;
@@ -770,6 +791,9 @@ Description=Renew the Zcode Gateway TLS certificate (acme.sh)
 [Service]
 Type=oneshot
 UMask=0077
+# acme.sh exits 2 when the certificate is not due yet ("Skipping"); that is the
+# normal outcome of most timer runs and must not leave a failed unit behind
+SuccessExitStatus=2
 ExecStart=/usr/bin/flock -n ${UPDATE_LOCK} ${ACME_HOME}/acme.sh --renew --home ${ACME_HOME} --server letsencrypt -d ${CURRENT_ACME_HOST}
 EOF
     cat > "$RENEW_TIMER_FILE" <<EOF
@@ -887,6 +911,10 @@ fetch_manager_verified() { # <destination> [already verified private stage]
 install_manager() {
     if [[ -n "$SELF" && -f "$SELF" && "$SELF" != /dev/* && "$SELF" != /proc/* ]]; then
         atomic_install "$SELF" "$MANAGER_BIN" 755 2>/dev/null && return 0
+    fi
+    # `curl | bash` with ZGW_FROM_SOURCE: the checkout carries the matching manager
+    if [[ -n "${ZGW_FROM_SOURCE:-}" && -f "$ZGW_FROM_SOURCE/install-linux.sh" ]]             && bash -n "$ZGW_FROM_SOURCE/install-linux.sh"; then
+        atomic_install "$ZGW_FROM_SOURCE/install-linux.sh" "$MANAGER_BIN" 755 && return 0
     fi
     fetch_manager_verified "$MANAGER_BIN"
 }
@@ -1152,11 +1180,28 @@ try:
             h.update(chunk); fh.write(chunk)
     if h.hexdigest() != expected:
         sys.exit("Node.js download: SHA-256 mismatch")
+    # Validate every member ourselves: Python 3.10/3.11's backported "data"
+    # filter resolves a relative symlink (bin/npm -> ../lib/...) against the
+    # extraction root instead of its own directory and rejects the official
+    # archive (Ubuntu 22.04). Only regular files, dirs and in-tree symlinks.
+    root = os.path.realpath(tmp)
     with tarfile.open(archive) as tf:
-        try:
-            tf.extractall(tmp, filter="data")
-        except TypeError:
-            tf.extractall(tmp)
+        members = tf.getmembers()
+        for m in members:
+            path = os.path.normpath(os.path.join(root, m.name))
+            if not path.startswith(root + os.sep) or not (m.isfile() or m.isdir() or m.issym()):
+                sys.exit(f"Node.js archive: refusing member {m.name!r}")
+            if m.issym():
+                link = os.path.normpath(os.path.join(os.path.dirname(path), m.linkname))
+                if os.path.isabs(m.linkname) or not link.startswith(root + os.sep):
+                    sys.exit(f"Node.js archive: refusing link {m.name!r} -> {m.linkname!r}")
+            m.mode &= 0o755
+            m.uid = m.gid = 0
+            m.uname = m.gname = "root"
+        if hasattr(tarfile, "fully_trusted_filter"):
+            tf.extractall(tmp, members=members, filter="fully_trusted")
+        else:
+            tf.extractall(tmp, members=members)
     target = os.path.join(dest_root, "node")
     if os.path.islink(target):
         sys.exit("Node.js destination must not be a symlink")
@@ -1172,7 +1217,8 @@ PY
 _prefetch_wrangler() {
     local d rc=0; d="$(mktemp -d)"
     chown "${SVC_USER}:${SVC_USER}" "$d" || { rm -rf -- "$d"; return 1; }
-    ( cd "$d" && run_tool_user npx --yes wrangler --version ) || rc=$?
+    # pinned LTS Node: bleeding-edge Node majors crash wrangler at startup
+    ( cd "$d" && run_tool_user npx --yes --package node@22 --package wrangler@4 -- wrangler --version ) || rc=$?
     rm -rf "$d"
     return $rc
 }
@@ -1180,8 +1226,8 @@ setup_node_for_mail() {
     if (( $(_node_major) >= 22 )) && run_tool_user sh -c 'command -v npx' >/dev/null 2>&1; then
         ok "Node.js $(run_tool_user node --version) already present — using it for the mail worker"
     else
-        run_quiet "Installing Node.js 22 LTS for the mail worker (official build, checksum verified)" _install_node \
-            || { warn "Node.js install failed — the dashboard will retry it on the first mail-worker deploy"; return 0; }
+        run_quiet "Installing Node.js LTS (>= 22) for the mail worker (official build, checksum verified)" _install_node \
+            || { warn "Node.js install failed — the dashboard will retry it on the first mail-worker deploy"; return 1; }
     fi
     mkdir -p "${ZGW_INSTALL_DIR}/home"
     run_quiet "Preparing the Cloudflare tool (wrangler, one-time download)" _prefetch_wrangler \
@@ -1214,6 +1260,9 @@ setup_generator_env() {
                 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2
                 libgbm1 libpango-1.0-0 libcairo2 libatspi2.0-0 "$alsa" fonts-liberation) ;;
         arch|manjaro|parch) browser_libs=(nss nspr atk at-spi2-core cups libdrm libxkbcommon libxcomposite libxdamage libxfixes libxrandr mesa pango cairo alsa-lib) ;;
+        opensuse-*|sles) browser_libs=(mozilla-nss mozilla-nspr libatk-1_0-0 libatk-bridge-2_0-0 libcups2 libdrm2
+                libxkbcommon0 libXcomposite1 libXdamage1 libXfixes3 libXrandr2 libgbm1 libpango-1_0-0
+                libcairo2 libasound2) ;;
         *) browser_libs=(nss nspr atk at-spi2-atk cups-libs libdrm libxkbcommon libXcomposite libXdamage libXfixes libXrandr mesa-libgbm pango cairo alsa-lib) ;;
     esac
     run_quiet "Installing Xvfb and distribution Chromium libraries" install_pkgs "$xvfb_pkg" "${browser_libs[@]}"
@@ -1250,8 +1299,11 @@ setup_generator_env() {
     fi
     chmod 600 "${ZGW_INSTALL_DIR}/config.yaml"
     chk ok "generator environment ready (venv + Chromium) — no setup popup in the dashboard"
-    setup_node_for_mail
-    chk ok "mail worker tooling ready (Node.js + wrangler) — deploy it from the dashboard with a Cloudflare API token"
+    if setup_node_for_mail; then
+        chk ok "mail worker tooling ready (Node.js + wrangler) — deploy it from the dashboard with a Cloudflare API token"
+    else
+        chk warn "mail worker tooling NOT ready (Node.js install failed) — the first mail-worker deploy retries it"
+    fi
 }
 
 cmd_install() (
@@ -1295,8 +1347,12 @@ cmd_install() (
     fi
 
     step "2/9" "Installing prerequisites (curl, openssl, socat, Python YAML parser)"
+    # RHEL 9 family / Amazon Linux ship curl-minimal, which conflicts with the
+    # full curl package: only ask for curl when no curl is installed at all
+    local -a prereqs=(openssl ca-certificates socat)
+    command -v curl >/dev/null 2>&1 || prereqs=(curl "${prereqs[@]}")
     run_quiet "Installing curl, openssl, ca-certificates, socat" \
-        install_pkgs curl openssl ca-certificates socat
+        install_pkgs "${prereqs[@]}"
     for c in curl openssl socat; do
         command -v "$c" >/dev/null 2>&1 || fail "$c did not install correctly"
     done
@@ -1306,7 +1362,7 @@ cmd_install() (
     case "$release" in
         arch|manjaro|parch) python_pkg=python; yaml_pkg=python-yaml ;;
         fedora|amzn|rhel|almalinux|rocky|ol|centos) yaml_pkg=python3-pyyaml ;;
-        opensuse-*) yaml_pkg=python3-PyYAML ;;
+        opensuse-*|sles) yaml_pkg=python3-PyYAML ;;
     esac
     run_quiet "Installing Python3 + PyYAML for safe config updates" install_pkgs "$python_pkg" "$yaml_pkg"
     system_python -c 'import yaml' || fail "Python3/PyYAML is required to preserve existing configuration"
@@ -1538,7 +1594,7 @@ final_report() { # final_report <admin> <client> <tls-note>
 
 cmd_update() (
     need_root; is_installed || fail "not installed — run: autozcoder install"
-    local stage committed=0 activated=0 stopped=0 managed=1 healthy=0 i path name
+    local stage committed=0 activated=0 stopped=0 managed=1 healthy=0 i path name health_url
     [[ "${ZGW_SKIP_SYSTEMD:-0}" == 1 ]] && managed=0
     # Serialize root-owned transactions, including manager refresh.
     acquire_mutation_lock
@@ -1567,7 +1623,7 @@ cmd_update() (
                 systemctl restart "$SERVICE" || rollback_ok=0
                 local restored_health=0
                 for i in $(seq 1 30); do
-                    if curl -fkSs --max-time 2 "$(gw_health_url)" >/dev/null 2>&1; then restored_health=1; break; fi
+                    if curl -fkSs --max-time 2 "$health_url" >/dev/null 2>&1; then restored_health=1; break; fi
                     sleep 1
                 done
                 [[ "$restored_health" == 1 ]] || rollback_ok=0
@@ -1589,6 +1645,10 @@ cmd_update() (
         ( ZGW_INSTALL_DIR="$stage/source"; build_from_source "$ZGW_FROM_SOURCE" ) || fail "source staging failed; installed binary unchanged"
         mv -- "$stage/source/ZcodeGateway" "$stage/ZcodeGateway"
         validate_gateway "$stage/ZcodeGateway" || fail "invalid source binary"
+        # refresh the manager from the same checkout as the binary
+        if [[ -f "$ZGW_FROM_SOURCE/install-linux.sh" ]] && bash -n "$ZGW_FROM_SOURCE/install-linux.sh"; then
+            install -m 600 -- "$ZGW_FROM_SOURCE/install-linux.sh" "$stage/install-linux.sh"                 || fail "cannot stage the source manager"
+        fi
     else
         stage_release "$stage" || fail "release staging/verification failed; installed binary unchanged"
     fi
@@ -1599,6 +1659,7 @@ cmd_update() (
         || fail "cannot secure installation directory"
     # Stop writers before snapshotting files from older, service-owned installs.
     if [[ "$managed" == 1 ]]; then
+        health_url="$(gw_health_url)" || fail "cannot resolve the installed gateway's health URL"
         systemctl stop "$SERVICE" || fail "could not stop service"
         stopped=1
     fi
@@ -1636,7 +1697,7 @@ cmd_update() (
     # choices must not silently change during a binary-only update.
     systemctl restart "${SERVICE}" || fail "updated binary could not restart"
     for i in $(seq 1 30); do
-        if curl -fkSs --max-time 2 "$(gw_health_url)" >/dev/null 2>&1; then healthy=1; break; fi
+        if curl -fkSs --max-time 2 "$health_url" >/dev/null 2>&1; then healthy=1; break; fi
         sleep 1
     done
     [[ "$healthy" == 1 ]] || fail "updated gateway did not become healthy"
@@ -1706,6 +1767,9 @@ cmd_cert() (
     : >> "$LOG_FILE"
     SERVER_IP="$(detect_server_ip)"
     plan_port80
+    # "re-issue / switch": on a terminal, ask again (saved mode is the default)
+    # unless the operator passed ZGW_SSL_MODE explicitly
+    if [[ "$TTY_OK" == 1 && -z "${ZGW_SSL_MODE_ENV:-}" ]]; then ZGW_SSL_MODE=""; fi
     choose_tls_mode
     local mode="$TLS_MODE_CHOICE"
     stage="$(update_tmpdir)" || fail "cannot create private certificate transaction"
@@ -1734,7 +1798,7 @@ cmd_cert() (
             for host in "${SAVED_ACME_HOST:-}" "$new_host"; do
                 [[ -n "$host" ]] || continue
                 for entry in "$host" "${host}_ecc"; do
-                    rm -rf -- "$ACME_HOME/$entry" || rollback_ok=0
+                    rm -rf -- "${ACME_HOME:?}/$entry" || rollback_ok=0
                     [[ ! -d "$stage/acme/$entry" ]] || cp -a -- "$stage/acme/$entry" "$ACME_HOME/$entry" || rollback_ok=0
                 done
             done
@@ -1943,7 +2007,7 @@ cmd_uninstall() (
         was_active=1
         systemctl stop "$SERVICE" || fail "could not stop the gateway service"
     fi
-    local proc pid attempt
+    local proc pid
     local -a manual_pids=()
     for proc in /proc/[0-9]*/exe; do
         if [[ "$(readlink -- "$proc" 2>/dev/null || true)" == "$target/ZcodeGateway" ]]; then
@@ -1953,7 +2017,7 @@ cmd_uninstall() (
         fi
     done
     for pid in "${manual_pids[@]}"; do
-        for attempt in {1..30}; do
+        for _ in {1..30}; do
             [[ "$(readlink -- "/proc/$pid/exe" 2>/dev/null || true)" == "$target/ZcodeGateway" ]] || break
             sleep 1
         done

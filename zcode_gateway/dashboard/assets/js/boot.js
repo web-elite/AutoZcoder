@@ -25,11 +25,22 @@ const SECTIONS = [
       load: () => import("./views/accounts.js") },
     { name: "models", icon: "models", poll: 8000,
       load: () => import("./views/models.js") },
-    { name: "generator", icon: "bolt", poll: 3000,
-      load: () => import("./views/generator.js") },
-    { name: "proxy", icon: "swap", poll: 3000,
-      load: () => import("./views/proxy.js") },
-    { name: "server", icon: "server", poll: 0,
+    { title: "Generator", icon: "bolt", children: [
+      { name: "generator", title: "Manual signup", poll: 3000, load: () => import("./views/generator.js") },
+      { name: "generator/auto", title: "Auto Generate", poll: 3000, load: () => import("./views/auto-generate.js") },
+      { name: "generator/mail", title: "Email setup", load: () => import("./views/generator/mail.js") },
+    ] },
+    { title: "IP Routes", icon: "swap", children: [
+      { name: "proxy", title: "Proxy pool", poll: 3000, load: () => import("./views/proxy.js") },
+      ...[["psiphon", "Psiphon"], ["surfshark", "Surfshark"]].map(([provider, title]) => ({
+        name: "ip-routes/" + provider, title, poll: 3000,
+        load: async () => {
+          const { mountProvider } = await import("./views/generator/vpn.js");
+          return { mount: (ctx) => mountProvider(ctx, provider) };
+        },
+      })),
+    ] },
+    { name: "server", title: "Server", icon: "server", poll: 0,
       load: () => import("./views/server.js") },
   ]},
   { group: "insight", items: [
@@ -52,30 +63,38 @@ const titleKey = (name) => "topbar.title." + name;
 
 function buildNav() {
   const nav = $("#nav");
+  const link = (item) => el("a", {
+    class: "nav-item", href: "#/" + item.name, data: { route: item.name },
+    on: { click: closeNav },
+  }, [item.icon ? icon(ICONS[item.icon] || ICONS.dot) : null, el("span", { text: item.title })]);
   fill(nav, SECTIONS.map((group) => el("div", { class: "nav__group" }, [
-    el("div", { class: "nav__label", text: t("nav.group." + group.group) }),
-    ...group.items.map((item) => el("button", {
-      class: "nav-item",
-      type: "button",
-      data: { route: item.name },
-      on: { click: () => { router.navigate(item.name); closeNav(); } },
-    }, [
-      icon(ICONS[item.icon] || ICONS.dot),
-      el("span", { text: t(titleKey(item.name)) }),
-    ])),
+    el("div", { class: "nav__label", text: group.group }),
+    ...group.items.map((item) => item.children ? el("details", { class: "nav-branch" }, [
+      el("summary", { class: "nav-item nav-branch__toggle" }, [
+        icon(ICONS[item.icon]), el("span", { text: item.title }),
+      ]),
+      el("div", { class: "nav-branch__children" }, item.children.map(link)),
+    ]) : link(item)),
   ])));
 }
 
 function markActive(name) {
-  for (const btn of document.querySelectorAll(".nav-item")) {
+  for (const btn of document.querySelectorAll(".nav-item[data-route]")) {
     const active = btn.dataset.route === name;
     btn.classList.toggle("is-active", active);
-    if (active) btn.setAttribute("aria-current", "page");
+    if (active) {
+      btn.setAttribute("aria-current", "page");
+      const parent = btn.closest("details");
+      if (parent) parent.open = true;
+    }
     else btn.removeAttribute("aria-current");
   }
 }
 
-const closeNav = () => $("#app").classList.remove("is-nav-open");
+const closeNav = () => {
+  $("#app").classList.remove("is-nav-open");
+  $("#nav-toggle").setAttribute("aria-expanded", "false");
+};
 
 /* ------------------------------------------------------------- status ---- */
 
@@ -256,8 +275,8 @@ async function main() {
   wireChrome();
 
   for (const group of SECTIONS) {
-    for (const item of group.items) {
-      router.register(item.name, { title: t(titleKey(item.name)), poll: item.poll, load: item.load });
+    for (const item of group.items.flatMap(item => item.children || [item])) {
+      router.register(item.name, { title: item.title, poll: item.poll, load: item.load });
     }
   }
 

@@ -204,13 +204,13 @@ export function createAutoGenerate({ signal } = {}) {
   const displayField = field("browser_display", t("v3.auto.browser_display"), el("select", { class: "select" }, [
     el("option", { value: "background", text: t("v3.auto.browser_background") }),
     el("option", { value: "desktop", text: t("v3.auto.browser_desktop") }),
-  ), t("v3.auto.browser_help"));
+  ]), t("v3.auto.browser_help"));
   const captchaField = field("captcha", t("v3.auto.captcha_solver"), el("select", { class: "select" }, [
     el("option", { value: "auto", text: t("v3.auto.captcha_auto") }),
     el("option", { value: "ai", text: t("v3.auto.captcha_ai") }),
     el("option", { value: "classic", text: t("v3.auto.captcha_classic") }),
     el("option", { value: "mint", text: t("v3.auto.captcha_mint") }),
-  ), t("v3.auto.captcha_help"));
+  ]), t("v3.auto.captcha_help"));
   const timeoutField = number("timeout_seconds", 1, "Maximum seconds for a single attempt before it is stopped.", t("v3.auto.timeout_label"));
   const failureField = number("failure_limit", 1, "Stop after this many consecutive failures. Review the reason before starting again.", t("v3.auto.failure_label"));
   for (const [key, min, max] of [["target", 1, 1000], ["attempt_limit", 1, 10000],

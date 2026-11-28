@@ -81,6 +81,18 @@ def _fix_streams() -> None:
                 setattr(sys, name, open(path, "a", encoding="utf-8", buffering=1))
             except OSError:
                 pass
+        # Route the whole process (uvicorn.error, zcode_gateway, asyncio, ...)
+        # to the diagnostic file. app.setup_logging only runs when the server
+        # worker boots uvicorn — when startup dies earlier (import, config,
+        # bind) nothing has attached a root handler, the "zcode-gateway.log"
+        # the user was told to check stays empty, and the crash is unfindable.
+        handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+        root = logging.getLogger()
+        if handler not in root.handlers:
+            root.addHandler(handler)
+        root.setLevel(logging.INFO)
         _desktop_log.info("Desktop launcher starting; diagnostic log: %s", path)
     except Exception:
         # Logging must never prevent the gateway itself from starting.

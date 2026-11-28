@@ -7,6 +7,7 @@ import { card, button, badge, metric } from "../core/ui.js";
 import { locateCard, openEnvSetup, ensureEnvironment } from "./generator/setup.js";
 import { can, isHeadless, platform } from "../core/caps.js";
 import { createClaimBatch } from "./claim-batch.js";
+import { t } from "../core/i18n.js";
 
 const WORKER_TONE = {
   running: "ok", starting: "warn", exited: "ok", failed: "err", killed: "err",
@@ -38,18 +39,18 @@ function workerCard(w, onStop, onRemove, onDetail) {
     el("div", { class: "job__head" }, [
       el("span", { class: "dot dot--" + (WORKER_TONE[w.state] || "") + (w.state === "running" ? " dot--live" : "") }),
       el("b", { class: "job__name truncate", text: w.name }),
-      badge(w.state, WORKER_TONE[w.state]),
+      badge(t("state." + w.state), WORKER_TONE[w.state]),
       w.email ? el("span", { class: "mono text-xs muted truncate", text: w.email }) : null,
       w.route_label || w.proxy ? el("span", { class: "mono text-xs faint", title: w.proxy,
         text: w.route_label || trimProxy(w.proxy) }) : null,
-      el("span", { class: "faint text-xs", text: "captcha " + (w.captcha || "—") }),
+      el("span", { class: "faint text-xs", text: t("v3.generator.captcha") + ": " + (w.captcha || "—") }),
       ...planBadges(w),
       w.has_log && platform() === "windows"
-        ? button({ label: "Open log", variant: "quiet", onClick: () => onDetail(w, "open-log") }) : null,
+        ? button({ label: t("v3.generator.open_log"), variant: "quiet", onClick: () => onDetail(w, "open-log") }) : null,
       w.has_log
-        ? button({ label: "Copy log", variant: "quiet", onClick: () => onDetail(w, "log") }) : null,
+        ? button({ label: t("v3.generator.copy_log"), variant: "quiet", onClick: () => onDetail(w, "log") }) : null,
       w.has_password
-        ? button({ label: "Copy password", variant: "quiet", onClick: () => onDetail(w, "password") }) : null,
+        ? button({ label: t("v3.generator.copy_password"), variant: "quiet", onClick: () => onDetail(w, "password") }) : null,
       el("span", { class: "spacer" }),
       live
         ? button({ label: t("gen.kill"), variant: "danger", onClick: () => onStop(w.name) })
@@ -220,7 +221,7 @@ export async function mount({ root, signal }) {
       input.addEventListener("change", () => {
         if (!input.checked && ipSources.length === 1) {
           input.checked = true;
-          toast("Keep at least one IP source selected", "warn");
+          toast(t("v3.generator.keep_source"), "warn");
           return;
         }
         ipSources = input.checked ? [...ipSources, id] : ipSources.filter((s) => s !== id);
@@ -235,14 +236,14 @@ export async function mount({ root, signal }) {
     };
 
     const vpnSources = ["psiphon", "surfshark"];
-    const pick = el("select", { class: "select", id: "generator-ippick", "aria-label": "Exit in use" });
+    const pick = el("select", { class: "select", id: "generator-ippick", "aria-label": t("v3.auto.exit_label") });
     pick.addEventListener("change", () => { ipPick = pick.value; saveOptions(); });
     const pickSlot = el("div", { class: "ip-pick", hidden: true }, [pick]);
     const help = el("div", { class: "field__help" });
     const modeRow = el("div", { class: "row ip-line" }, [
-      el("span", { class: "field__label ip-label", text: "Mode" }),
-      modeOption("spread", "Random", "Each signup picks a random connected exit"),
-      modeOption("single", "Stay on one", "Use the chosen VPN exit or the first connected VPN exit if it goes offline"),
+      el("span", { class: "field__label ip-label", text: t("v3.auto.mode_label") }),
+      modeOption("spread", t("v3.auto.random"), t("v3.auto.random_help")),
+      modeOption("single", t("v3.auto.stay_one"), t("v3.auto.stay_one_help")),
       pickSlot,
     ]);
     let renderedChoices;
@@ -250,15 +251,14 @@ export async function mount({ root, signal }) {
       const selectedVpns = vpnSources.filter((source) => ipSources.includes(source));
       modeRow.hidden = !selectedVpns.length;
       pickSlot.hidden = ipMode !== "single" || modeRow.hidden;
-      help.textContent = modeRow.hidden ? "Pick one or more IP sources."
-        : "Signups use the selected VPNs. Connect at least one exit before starting.";
+      help.textContent = modeRow.hidden ? t("v3.auto.sources_help") : t("v3.auto.vpn_help");
       if (pickSlot.hidden) return;
       const choices = (status?.options?.ip_exits || []).filter((e) =>
         selectedVpns.includes(e.key.split(":")[0]));
       if (edited && !selectedVpns.includes(ipPick.split(":")[0])) ipPick = choices[0]?.key || "";
       const selected = choices.some((e) => e.key === ipPick) ? ipPick : "";
       const options = selected ? choices : [{ key: "", label: choices.length
-        ? "First connected VPN exit" : "No connected VPN exits" }, ...choices];
+        ? t("v3.auto.exit_first") : t("v3.auto.exit_none") }, ...choices];
       const signature = JSON.stringify(options);
       if (signature !== renderedChoices) {
         fill(pick, options.map((e) => el("option", { value: e.key, text: e.label })));
@@ -270,12 +270,12 @@ export async function mount({ root, signal }) {
 
     const field = el("div", { class: "field ip-field" }, [
       el("div", { class: "row ip-line" }, [
-        el("span", { class: "field__label ip-label", text: "IP sources" }),
-        card("pool", "Proxy pool (" + (o.pool_available || 0) + ")", "Rotates proxies from the pool"),
-        card("direct", "My network", "No proxy"),
-        card("pin", "Pinned proxy", "One fixed proxy address"),
-        card("psiphon", "Psiphon", "Connected Psiphon regions"),
-        card("surfshark", "Surfshark", "Connected Surfshark locations"),
+        el("span", { class: "field__label ip-label", text: t("v3.auto.sources_label") }),
+        card("pool", t("v3.auto.proxy_pool_count", { n: o.pool_available || 0 }), t("v3.auto.source_pool_help")),
+        card("direct", t("v3.auto.source_direct"), t("v3.auto.source_direct_help")),
+        card("pin", t("v3.auto.source_pin"), t("v3.auto.source_pin_help")),
+        card("psiphon", t("v3.auto.source_psiphon"), t("v3.auto.source_psiphon_help")),
+        card("surfshark", t("v3.auto.source_surfshark"), t("v3.auto.source_surfshark_help")),
       ]),
       modeRow,
       help,
@@ -295,10 +295,10 @@ export async function mount({ root, signal }) {
     const claimToggle = el("input", {
       class: "switch__input", type: "checkbox", checked: claimStartOn,
     });
-    const claimState = el("span", { class: "text-sm muted", text: claimStartOn ? "On" : "Off" });
+    const claimState = el("span", { class: "text-sm muted", text: claimStartOn ? t("settings.on") : t("settings.off") });
     claimToggle.addEventListener("change", () => {
       claimStartOn = claimToggle.checked;
-      claimState.textContent = claimStartOn ? "On" : "Off";
+      claimState.textContent = claimStartOn ? t("settings.on") : t("settings.off");
       saveOptions();
     });
 
@@ -399,7 +399,7 @@ export async function mount({ root, signal }) {
     const email = await api.get("/admin/dash/generator/mail", { signal }).catch(() => null);
     if (signal.aborted || destroyed) return;
     if (!email?.ready) {
-      toast(email ? "Finish Email setup before starting. Configure routing and verify the worker inbox."
+      toast(email ? t("v3.generator.finish_email")
         : "Could not check Email setup. Try again when the gateway is reachable.", "warn");
       if (email) location.hash = "#/generator/mail";
       return;
@@ -411,19 +411,19 @@ export async function mount({ root, signal }) {
       const r = await api.post("/admin/dash/generator/start", { count });
       if (r?.error) { toast(r.error, "err"); return; }
       const started = r.started.length;
-      toast("Started " + started + " worker" + (started === 1 ? "" : "s"), "ok");
+      toast(t("v3.generator.started", { n: started }), "ok");
       load();
     } catch (e) { toast("start: " + e.message, "err"); }
   }
 
   async function stopAll() {
     const ok = await confirmDialog({
-      title: "Stop every worker?",
+      title: t("v3.generator.stop_all_title"),
       body: "Stops signup workers. Use Stop batch for the queued claims, or Kill on an individual claim.",
       okLabel: "Stop all", danger: true,
     });
     if (!ok) return;
-    try { await api.post("/admin/dash/generator/stopall"); toast("Stopping all workers", "ok"); load(); }
+    try { await api.post("/admin/dash/generator/stopall"); toast(t("v3.generator.stopping_all"), "ok"); load(); }
     catch (e) { toast(e.message, "err"); }
   }
 
@@ -493,10 +493,10 @@ export async function mount({ root, signal }) {
     const failed = workers.filter((w) => ["failed", "killed"].includes(w.state)).length;
 
     fill(summaryBox, [
-      metric({ label: "Running", value: running, tone: running ? "ok" : null }),
-      metric({ label: "Finished", value: done }),
-      metric({ label: "Failed", value: failed, tone: failed ? "err" : null }),
-      metric({ label: "Claims", value: claims.length }),
+      metric({ label: t("v3.generator.running"), value: running, tone: running ? "ok" : null }),
+      metric({ label: t("v3.generator.finished"), value: done }),
+      metric({ label: t("v3.generator.failed"), value: failed, tone: failed ? "err" : null }),
+      metric({ label: t("v3.generator.claims"), value: claims.length }),
     ]);
 
     const cards = [
@@ -506,16 +506,16 @@ export async function mount({ root, signal }) {
     fill(boardBox, cards.length
       ? cards
       : el("div", { class: "empty" }, [
-          el("div", { class: "empty__title", text: "No workers running" }),
-          el("div", { class: "empty__text", text: "Signup and claim workers appear here when they start." }),
+          el("div", { class: "empty__title", text: t("v3.generator.empty_title") }),
+          el("div", { class: "empty__text", text: t("v3.generator.empty_text") }),
         ]));
   }
 
   function buildShell() {
     const actions = el("div", { class: "row manual-signup-controls" }, [
-      button({ label: "Start manual signup", icon: "bolt", variant: "primary", size: "md", onClick: start }),
-      button({ label: "Stop all", onClick: stopAll }),
-      button({ label: "Environment setup", icon: "settings", onClick: () => openEnvSetup() }),
+      button({ label: t("v3.generator.start_manual"), icon: "bolt", variant: "primary", size: "md", onClick: start }),
+      button({ label: t("v3.generator.stop_all"), onClick: stopAll }),
+      button({ label: t("v3.generator.environment"), icon: "settings", onClick: () => openEnvSetup() }),
       el("span", { class: "manual-signup-status" }, [savedNote, saveFeedback]),
     ]);
 
@@ -529,15 +529,15 @@ export async function mount({ root, signal }) {
         : null,
       summaryBox,
       card({
-        title: "Manual signup",
-        desc: "Launch a one-time run using these settings. Use Auto Generate for unattended runs.",
+        title: t("v3.generator.manual"),
+        desc: t("v3.generator.manual_desc"),
         body: el("div", { class: "stack" }, [actions, optionsBox]),
       }),
       batch.node,
-      card({ title: "Workers", body: boardBox, flush: true,
-        actions: button({ label: "Clear finished", variant: "quiet", onClick: clearFinished }) }),
+      card({ title: t("v3.generator.workers"), body: boardBox, flush: true,
+        actions: button({ label: t("v3.generator.clear_finished"), variant: "quiet", onClick: clearFinished }) }),
       card({
-        title: "Pipeline",
+        title: t("v3.generator.pipeline"),
         body: el("p", { class: "field__help", text:
           "signup → device login → app activity → billing preview → Aliyun captcha → billing claim → "
           + "the account joins the pool automatically." }),

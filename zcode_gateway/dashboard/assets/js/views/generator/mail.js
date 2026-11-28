@@ -8,6 +8,7 @@ import { el, fill } from "../../core/dom.js";
 import { api } from "../../core/api.js";
 import { toast } from "../../core/toast.js";
 import { card, button, badge } from "../../core/ui.js";
+import { t } from "../../core/i18n.js";
 
 // Hostname labels plus a letter TLD or an IDN (punycode) TLD such as xn--p1ai.
 const DOMAIN_RE = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
@@ -37,8 +38,8 @@ export function createMailCard() {
 
   const body = el("div", { class: "stack" });
   const node = card({
-    title: "Email setup",
-    desc: "Connect a Cloudflare domain to the verification inbox.",
+    title: t("v3.mail.title"),
+    desc: t("v3.mail.desc"),
     body,
   });
 
@@ -87,9 +88,9 @@ export function createMailCard() {
     const header = el("div", { class: "row row--tight" }, [
       el("span", { class: "mono", text: domain }),
       el("span", { class: "text-sm " + statusClass, text: statusText }),
-      inUse ? badge(m.rotate ? "In rotation" : "Used for signups", "accent") : null,
+      inUse ? badge(m.rotate ? t("v3.mail.in_rotation") : t("v3.mail.used_for_signups"), "accent") : null,
       multi && !m.rotate && !isActive
-        ? button({ label: "Use for signups", disabled: state.deploying,
+        ? button({ label: t("v3.mail.use_for_signups"), disabled: state.deploying,
                    onClick: () => setActive(domain) })
         : null,
       review && deferred
@@ -328,7 +329,7 @@ export function createMailCard() {
   async function setActive(domain) {
     try {
       await api.post("/admin/dash/generator/mail", { active: domain });
-      toast("Signups now use " + domain, "ok");
+      toast(t("v3.mail.signups_use_domain", { domain }), "ok");
       await refresh();
     } catch (e) { toast(e.message, "err"); }
   }
@@ -336,7 +337,7 @@ export function createMailCard() {
   async function setRotate(on) {
     try {
       await api.post("/admin/dash/generator/mail", { rotate: on });
-      toast(on ? "Signups rotate across routed domains" : "Signups use one domain", "ok");
+      toast(on ? t("v3.mail.rotate_enabled") : t("v3.mail.rotate_disabled"), "ok");
       await refresh();
     } catch (e) {
       rotateInput.checked = !on;
@@ -393,14 +394,14 @@ export function createMailCard() {
   const rotateField = el("div", { class: "field" }, [
     el("label", { class: "switch" }, [
       rotateInput, el("span", { class: "switch__track" }),
-      el("span", { class: "text-sm", text: "Rotate signups across all routed domains" }),
+      el("span", { class: "text-sm", text: t("v3.mail.rotate_all") }),
     ]),
     el("div", { class: "field__help", text:
       "Each signup picks a random domain whose routing is configured. Domains still pending are skipped." }),
   ]);
 
-  const deployBtn = button({ label: "Set up email", variant: "primary", onClick: deploy });
-  const testBtn = button({ label: "Test worker inbox", onClick: testInbox });
+  const deployBtn = button({ label: t("v3.mail.setup"), variant: "primary", onClick: deploy });
+  const testBtn = button({ label: t("v3.mail.test_inbox"), onClick: testInbox });
 
   function paint(m) {
     const doms = m.domains || [];
@@ -463,7 +464,7 @@ export function createMailCard() {
 
     testBtn.hidden = !credentialsSaved;
     testBtn.disabled = deployBtn.disabled = state.deploying || state.testing;
-    deployBtn.querySelector("span").textContent = state.deploying ? "Setting up email…" : ready ? "Run setup again" : "Set up email";
+    deployBtn.querySelector("span").textContent = state.deploying ? t("mail.inbox.testing") : ready ? t("v3.mail.run_again") : t("v3.mail.setup");
     for (const f of Object.values(fields)) f.disabled = state.deploying;
   }
 
@@ -514,7 +515,7 @@ export function createMailCard() {
             fields.inboxSecret,
           ]),
           el("div", { class: "row" }, [
-            button({ label: "Save inbox settings", onClick: saveManual }),
+            button({ label: t("v3.mail.save_inbox"), onClick: saveManual }),
           ]),
           el("p", { class: "field__help", text:
             t("mail.inbox.manual_fallback") }),

@@ -3,6 +3,7 @@ import { toast } from "../core/toast.js";
 import { api } from "../core/api.js";
 import { card, button, stateBadge, badge } from "../core/ui.js";
 import { platform } from "../core/caps.js";
+import { t } from "../core/i18n.js";
 
 const PATH = "/admin/dash/generator/auto";
 const VPN_SOURCES = ["psiphon", "surfshark"];
@@ -16,15 +17,15 @@ const DEFAULTS = {
 const TERMINAL = new Set(["idle", "completed", "stopped", "failed"]);
 let nextID = 0;
 
-const SOURCE_LABELS = { pool: "Proxy pool", direct: "My network", pin: "Pinned proxy",
-  psiphon: "Psiphon", surfshark: "Surfshark" };
-const CAPTCHA_LABELS = { auto: "CV + AI vote", ai: "AI judge", classic: "CV solver", mint: "Mint token" };
+const SOURCE_LABELS = { pool: t("v3.auto.source_pool"), direct: t("v3.auto.source_direct"), pin: t("v3.auto.source_pin"),
+  psiphon: t("v3.auto.source_psiphon"), surfshark: t("v3.auto.source_surfshark") };
+const CAPTCHA_LABELS = { auto: t("v3.auto.captcha_auto"), ai: t("v3.auto.captcha_ai"), classic: t("v3.auto.captcha_classic"), mint: t("v3.auto.captcha_mint") };
 function routeLabel(config) {
   const sources = config.ip_sources?.length ? config.ip_sources
     : [["proxy", "socks"].includes(config.ip_source) ? "pool" : config.ip_source || "direct"];
   const text = sources.map((source) => SOURCE_LABELS[source] || source).join(" + ");
   if (!sources.some((source) => VPN_SOURCES.includes(source))) return text;
-  return text + (config.ip_mode === "single" ? " (stay on one)" : " (random)");
+  return text + " · " + t(config.ip_mode === "single" ? "v3.auto.stay_one" : "v3.auto.random");
 }
 
 function planBadges(w) {
@@ -48,18 +49,18 @@ function workerCard(w, onStop, onRemove, onDetail) {
       stateBadge(w.state),
       w.email ? el("span", { class: "mono text-xs muted truncate", text: w.email }) : null,
       w.route_label ? el("span", { class: "mono text-xs faint", text: w.route_label }) : null,
-      el("span", { class: "faint text-xs", text: "captcha " + (w.captcha || "—") }),
+      el("span", { class: "faint text-xs", text: t("v3.generator.captcha") + ": " + (CAPTCHA_LABELS[w.captcha] || "—") }),
       ...planBadges(w),
       w.has_log && platform() === "windows"
-        ? button({ label: "Open log", variant: "quiet", onClick: () => onDetail(w, "open-log") }) : null,
+        ? button({ label: t("v3.auto.open_log"), variant: "quiet", onClick: () => onDetail(w, "open-log") }) : null,
       w.has_log
-        ? button({ label: "Copy log", variant: "quiet", onClick: () => onDetail(w, "log") }) : null,
+        ? button({ label: t("v3.auto.copy_log"), variant: "quiet", onClick: () => onDetail(w, "log") }) : null,
       w.has_password
-        ? button({ label: "Copy password", variant: "quiet", onClick: () => onDetail(w, "password") }) : null,
+        ? button({ label: t("v3.auto.copy_password"), variant: "quiet", onClick: () => onDetail(w, "password") }) : null,
       el("span", { class: "spacer" }),
       live
-        ? button({ label: "Kill", variant: "danger", onClick: () => onStop(w.name) })
-        : button({ icon: "eyeOff", title: "Remove from list", variant: "quiet", onClick: () => onRemove(w.name) }),
+        ? button({ label: t("v3.auto.kill"), variant: "danger", onClick: () => onStop(w.name) })
+        : button({ icon: "eyeOff", title: t("v3.auto.remove"), variant: "quiet", onClick: () => onRemove(w.name) }),
     ]),
     lines.length
       ? el("div", { class: "job__log mono" }, lines.map((line) => el("div", { class: "logpane__line", text: line })))
@@ -96,10 +97,10 @@ export function createAutoGenerate({ signal } = {}) {
   const progress = el("p", { class: "auto-progress", text: t("auto.progress.loading") });
   const profile = el("p", { class: "auto-note" });
   const reason = el("p", { class: "auto-note", hidden: true });
-  const counts = el("dl", { class: "auto-counts", "aria-label": "Session counts" });
-  const slots = el("ul", { class: "auto-slots", "aria-label": "Browser slots" });
+  const counts = el("dl", { class: "auto-counts", "aria-label": t("v3.auto.session_aria") });
+  const slots = el("ul", { class: "auto-slots", "aria-label": t("v3.auto.attempt_workers") });
   const logPane = el("div", { class: "logpane mono auto-log", role: "region", tabindex: 0,
-    "aria-label": "Auto Generate live session log" });
+    "aria-label": t("v3.auto.session_aria") });
   const follow = el("input", { type: "checkbox", checked: true });
   let lastLog = "";
   const copyLog = button({ label: t("auto.copy_log"), icon: "copy", onClick: async () => {
@@ -120,19 +121,19 @@ export function createAutoGenerate({ signal } = {}) {
   const number = (key, min, help, label) => field(key, label, el("input", {
     class: "input", type: "number", min, step: 1, required: true, value: DEFAULTS[key],
   }), help);
-  const modeField = field("mode", "Run mode", el("select", { class: "select" }, [
-    el("option", { value: "goal", text: "Goal: new qualified Start Plan successes" }),
-    el("option", { value: "attempts", text: "Attempts: fixed signup budget" }),
-  ]), "Only new, qualified Start Plan successes count toward the goal.");
-  const targetField = number("target", 1, "Stop once this many new accounts qualify. No-plan and duplicate results do not count.", "Qualified success goal");
-  const attemptField = number("attempt_limit", 1, "Mandatory safety budget in goal mode; the run stops at this many launched attempts even if the goal is not reached.", "Maximum attempts");
-  const concurrencyField = number("concurrency", 1, "Signups started at once. Each slot runs one browser, so raise it as memory allows.", "Concurrent browsers");
+  const modeField = field("mode", t("v3.auto.run_mode"), el("select", { class: "select" }, [
+    el("option", { value: "goal", text: t("v3.auto.mode_goal") }),
+    el("option", { value: "attempts", text: t("v3.auto.mode_attempts") }),
+  ]), t("v3.auto.mode_help"));
+  const targetField = number("target", 1, t("v3.auto.goal_help"), t("v3.auto.goal_label"));
+  const attemptField = number("attempt_limit", 1, t("v3.auto.attempts_help"), t("v3.auto.attempts_label"));
+  const concurrencyField = number("concurrency", 1, t("v3.auto.concurrency_help"), t("v3.auto.concurrency_label"));
   controls.concurrency.max = 100;
-  const cooldownField = number("cooldown_seconds", 0, "Seconds a slot waits before its next attempt. Active attempts keep their own timeout.", "Cooldown (seconds)");
+  const cooldownField = number("cooldown_seconds", 0, t("v3.auto.cooldown_help"), t("v3.auto.cooldown_label"));
   // Same source picker as Manual signup: each attempt draws its own exit.
   const ipInputs = [];
   const modeInputs = [];
-  const poolLabel = el("span", { text: "Proxy pool (0)" });
+  const poolLabel = el("span", { text: t("v3.auto.proxy_pool_count", { n: 0 }) });
   const chip = (value, text, detail) => {
     const input = el("input", { type: "checkbox", checked: ipSources.includes(value) });
     input.value = value;
@@ -140,7 +141,7 @@ export function createAutoGenerate({ signal } = {}) {
     input.addEventListener("change", () => {
       if (!input.checked && ipSources.length === 1) {
         input.checked = true;
-        toast("Keep at least one IP source selected", "warn");
+        toast(t("v3.auto.keep_source"), "warn");
         return;
       }
       ipSources = input.checked ? [...ipSources, value] : ipSources.filter((source) => source !== value);
@@ -156,14 +157,14 @@ export function createAutoGenerate({ signal } = {}) {
     input.addEventListener("change", () => { ipMode = value; renderIpExits(true); edited(); });
     return el("label", { class: "chip", title: detail }, [input, el("span", { text: title })]);
   };
-  const ipPickSelect = el("select", { class: "select", "aria-label": "Exit in use" });
+  const ipPickSelect = el("select", { class: "select", "aria-label": t("v3.auto.exit_label") });
   ipPickSelect.addEventListener("change", () => { ipPick = ipPickSelect.value; edited(); });
   const pickSlot = el("div", { class: "ip-pick", hidden: true }, [ipPickSelect]);
   const ipHelp = el("p", { class: "field__help" });
   const modeRow = el("div", { class: "row ip-line" }, [
-    el("span", { class: "field__label ip-label", text: "Mode" }),
-    modeOption("spread", "Random", "Each signup picks a random connected exit"),
-    modeOption("single", "Stay on one", "Use the chosen VPN exit, or the first connected VPN exit if it goes offline"),
+    el("span", { class: "field__label ip-label", text: t("v3.auto.mode_label") }),
+    modeOption("spread", t("v3.auto.random"), t("v3.auto.random_help")),
+    modeOption("single", t("v3.auto.stay_one"), t("v3.auto.stay_one_help")),
     pickSlot,
   ]);
   let exitSignature;
@@ -172,14 +173,13 @@ export function createAutoGenerate({ signal } = {}) {
     modeRow.hidden = !vpns.length;
     pickSlot.hidden = ipMode !== "single" || modeRow.hidden;
     ipHelp.textContent = modeRow.hidden
-      ? "Pick one or more sources. Proxy pool rotates verified proxies; My network uses the system connection."
-      : "Signups use the selected VPNs. Connect at least one exit before starting.";
+      ? t("v3.auto.sources_help") : t("v3.auto.vpn_help");
     if (pickSlot.hidden) { pickChoices = []; ipPickSelect.disabled = true; return; }
     const choices = ipChoices.filter((e) => vpns.includes(e.key.split(":")[0]));
     if (resetPick && !vpns.includes(ipPick.split(":")[0])) ipPick = choices[0]?.key || "";
     const selected = choices.some((e) => e.key === ipPick) ? ipPick : "";
     const options = selected ? choices : [{ key: "", label: choices.length
-      ? "First connected VPN exit" : "No connected VPN exits" }, ...choices];
+      ? t("v3.auto.exit_first") : t("v3.auto.exit_none") }, ...choices];
     const signature = JSON.stringify(options);
     if (signature !== exitSignature) {
       fill(ipPickSelect, options.map((e) => el("option", { value: e.key, text: e.label })));
@@ -191,41 +191,41 @@ export function createAutoGenerate({ signal } = {}) {
   }
   const ipBlock = el("div", { class: "field ip-field" }, [
     el("div", { class: "row ip-line" }, [
-      el("span", { class: "field__label ip-label", text: "IP sources" }),
-      chip("pool", poolLabel, "Rotates verified proxies from the pool"),
-      chip("direct", "My network", "No proxy; uses the system connection"),
-      chip("pin", "Pinned proxy", "The fixed proxy from the generator settings"),
-      chip("psiphon", "Psiphon", "Rotates connected Psiphon regions"),
-      chip("surfshark", "Surfshark", "Rotates connected Surfshark locations"),
+      el("span", { class: "field__label ip-label", text: t("v3.auto.sources_label") }),
+      chip("pool", poolLabel, t("v3.auto.source_pool_help")),
+      chip("direct", t("v3.auto.source_direct"), t("v3.auto.source_direct_help")),
+      chip("pin", t("v3.auto.source_pin"), t("v3.auto.source_pin_help")),
+      chip("psiphon", t("v3.auto.source_psiphon"), t("v3.auto.source_psiphon_help")),
+      chip("surfshark", t("v3.auto.source_surfshark"), t("v3.auto.source_surfshark_help")),
     ]),
     modeRow,
     ipHelp,
   ]);
-  const displayField = field("browser_display", "Browser display", el("select", { class: "select" }, [
-    el("option", { value: "background", text: "Background (invisible)" }),
-    el("option", { value: "desktop", text: "Desktop window" }),
-  ]), "Windows background uses native headless Chromium, which the provider may reject. Linux background uses Xvfb. Desktop requires a real display. Applies only to this Auto Generate profile.");
-  const captchaField = field("captcha", "Captcha solver", el("select", { class: "select" }, [
-    el("option", { value: "auto", text: "auto — CV + AI vote" }),
-    el("option", { value: "ai", text: "ai — AI judge only" }),
-    el("option", { value: "classic", text: "classic — CV solver" }),
-    el("option", { value: "mint", text: "mint — headless token (no drag)" }),
-  ]), "How the solver picks the drag distance. Mint needs no drag and no AI; AI modes use the judge endpoint below.");
-  const timeoutField = number("timeout_seconds", 1, "Maximum seconds for a single attempt before it is stopped.", "Attempt timeout (seconds)");
-  const failureField = number("failure_limit", 1, "Stop after this many consecutive failures. Review the reason before starting again.", "Consecutive failure limit");
+  const displayField = field("browser_display", t("v3.auto.browser_display"), el("select", { class: "select" }, [
+    el("option", { value: "background", text: t("v3.auto.browser_background") }),
+    el("option", { value: "desktop", text: t("v3.auto.browser_desktop") }),
+  ), t("v3.auto.browser_help"));
+  const captchaField = field("captcha", t("v3.auto.captcha_solver"), el("select", { class: "select" }, [
+    el("option", { value: "auto", text: t("v3.auto.captcha_auto") }),
+    el("option", { value: "ai", text: t("v3.auto.captcha_ai") }),
+    el("option", { value: "classic", text: t("v3.auto.captcha_classic") }),
+    el("option", { value: "mint", text: t("v3.auto.captcha_mint") }),
+  ), t("v3.auto.captcha_help"));
+  const timeoutField = number("timeout_seconds", 1, "Maximum seconds for a single attempt before it is stopped.", t("v3.auto.timeout_label"));
+  const failureField = number("failure_limit", 1, "Stop after this many consecutive failures. Review the reason before starting again.", t("v3.auto.failure_label"));
   for (const [key, min, max] of [["target", 1, 1000], ["attempt_limit", 1, 10000],
     ["cooldown_seconds", 0, 3600], ["timeout_seconds", 60, 3600], ["failure_limit", 1, 100]]) {
     controls[key].min = min;
     controls[key].max = max;
   }
-  const saveButton = button({ label: "Save config", onClick: saveConfig });
-  const startButton = button({ label: "Auto Generate", variant: "primary", icon: "bolt", onClick: () => mutate("start") });
-  const pauseButton = button({ label: "Pause", onClick: () => mutate("pause") });
-  const resumeButton = button({ label: "Resume", onClick: () => mutate("resume") });
-  const stopButton = button({ label: "Stop session", variant: "danger", onClick: () => mutate("stop") });
-  const retryButton = button({ label: "Refresh status", onClick: refresh });
+  const saveButton = button({ label: t("v3.auto.save_config"), onClick: saveConfig });
+  const startButton = button({ label: t("v3.auto.start"), variant: "primary", icon: "bolt", onClick: () => mutate("start") });
+  const pauseButton = button({ label: t("v3.auto.pause"), onClick: () => mutate("pause") });
+  const resumeButton = button({ label: t("v3.auto.resume"), onClick: () => mutate("resume") });
+  const stopButton = button({ label: t("v3.auto.stop"), variant: "danger", onClick: () => mutate("stop") });
+  const retryButton = button({ label: t("v3.auto.refresh"), onClick: refresh });
   const tuning = el("details", { class: "help-details auto-tuning" }, [
-    el("summary", { text: "Browser and retry settings" }),
+    el("summary", { text: t("v3.auto.tuning") }),
     el("div", { class: "auto-fields" }, [concurrencyField, cooldownField, displayField,
       captchaField, timeoutField, failureField]),
   ]);
@@ -242,20 +242,20 @@ export function createAutoGenerate({ signal } = {}) {
     if (tuning.contains(event.target)) tuning.open = true;
   }, true);
   const logControls = el("div", { class: "auto-actions auto-log-controls", hidden: true }, [
-    el("label", { class: "checkline" }, [follow, el("span", { text: "Follow latest" })]), copyLog,
+    el("label", { class: "checkline" }, [follow, el("span", { text: t("v3.auto.follow") })]), copyLog,
   ]);
-  const logEmpty = el("p", { class: "auto-note", text: "No session events yet." });
-  const clearWorkers = button({ label: "Clear finished", variant: "quiet", onClick: () => clearFinishedWorkers() });
-  const workerEmpty = el("p", { class: "auto-note", text: "Attempt workers and their logs appear here while a session runs." });
+  const logEmpty = el("p", { class: "auto-note", text: t("v3.auto.no_events") });
+  const clearWorkers = button({ label: t("v3.auto.clear_finished"), variant: "quiet", onClick: () => clearFinishedWorkers() });
+  const workerEmpty = el("p", { class: "auto-note", text: t("v3.auto.workers_empty") });
   const workerBox = el("div", { class: "auto-workers-list" });
-  const node = card({ title: "Auto Generate", body: [
+  const node = card({ title: t("v3.auto.start"), body: [
     form, error, connection,
-    el("section", { class: "auto-session", "aria-label": "Auto Generate session" }, [
+    el("section", { class: "auto-session", "aria-label": t("v3.auto.session_aria") }, [
       el("div", { class: "auto-session-head" }, [state, progress,
         el("div", { class: "auto-actions" }, [pauseButton, resumeButton, stopButton, retryButton])]),
       profile, counts, reason, slots,
       el("div", { class: "auto-workers-head" }, [
-        el("h3", { class: "auto-subtitle", text: "Attempt workers" }), clearWorkers,
+        el("h3", { class: "auto-subtitle", text: t("v3.auto.attempt_workers") }), clearWorkers,
       ]),
       workerEmpty, workerBox,
       logEmpty, logControls, logPane,
@@ -311,7 +311,7 @@ export function createAutoGenerate({ signal } = {}) {
     controls.target.required = !targetField.hidden;
     controls.target.disabled = locked || targetField.hidden;
     controls.attempt_limit.setCustomValidity(!targetField.hidden && Number(controls.attempt_limit.value) < Number(controls.target.value)
-      ? "Maximum attempts must be at least the qualified success goal." : "");
+      ? t("v3.auto.max_attempts_error") : "");
     saveButton.disabled = locked || !healthy;
     startButton.disabled = locked || !healthy || !saved || dirty;
     pauseButton.hidden = !["preparing", "running", "starting", "cooling"].includes(status.state);
@@ -334,7 +334,7 @@ export function createAutoGenerate({ signal } = {}) {
     if (!data?.config || !data?.status?.state) throw new Error("Invalid Auto Generate response. Refresh status to retry.");
     ipChoices = data.ip_exits || [];
     poolAvailable = data.pool_available || 0;
-    poolLabel.textContent = "Proxy pool (" + poolAvailable + ")";
+    poolLabel.textContent = t("v3.auto.proxy_pool_count", { n: poolAvailable });
     if (!hydrated) {
       writeConfig(data.config);
       hydrated = true;
@@ -365,14 +365,13 @@ export function createAutoGenerate({ signal } = {}) {
       : mode === "goal" ? t("auto.progress.goal", { n: count(status.qualified), target: target })
       : t("auto.progress.attempts", { n: count(status.launched), target: count(status.attempt_limit ?? runConfig.attempt_limit) });
     profile.textContent = status.state === "idle" ? t("auto.profile.saved")
-      : (status.id ? "Session " + status.id + " | " : "") + (mode === "goal" ? "Goal mode" : "Attempts mode")
-        + " | " + count(runConfig.concurrency) + " browser slots | " + count(runConfig.cooldown_seconds)
-        + "s cooldown | " + routeLabel(runConfig) + " | "
-        + (runConfig.browser_display === "desktop" ? "Desktop window" : "Background (invisible)")
-        + " | " + (CAPTCHA_LABELS[runConfig.captcha] || "AI judge");
+      : t("v3.auto.profile", { id: status.id || "—", mode: t(mode === "goal" ? "v3.auto.goal_mode" : "v3.auto.attempts_mode"),
+          slots: count(runConfig.concurrency), cooldown: count(runConfig.cooldown_seconds), route: routeLabel(runConfig),
+          display: t(runConfig.browser_display === "desktop" ? "v3.auto.desktop_window" : "v3.auto.background_window"),
+          captcha: CAPTCHA_LABELS[runConfig.captcha] || t("v3.auto.captcha_ai") });
     counts.hidden = status.state === "idle";
-    fill(counts, [["launched", "Attempts reserved"], ["completed", "Finished attempts"], ["qualified", "Qualified"],
-      ["failed", "Unsuccessful"], ["no_plan", "No plan"], ["duplicates", "Duplicates"], ["active", "Active"], ["cooling", "Cooling"]]
+    fill(counts, [["launched", t("v3.auto.count_attempts")], ["completed", t("v3.auto.count_finished")], ["qualified", t("v3.auto.count_qualified")],
+      ["failed", t("v3.auto.count_failed")], ["no_plan", t("v3.auto.count_no_plan")], ["duplicates", t("v3.auto.count_duplicates")], ["active", t("v3.auto.count_active")], ["cooling", t("v3.auto.count_cooling")]]
       .map(([key, label]) => el("div", { class: "auto-count" }, [el("dt", { text: label }), el("dd", { text: String(count(status[key])) })])));
     const details = [];
     if (status.state === "interrupted") details.push(t("auto.interrupted"));
@@ -382,7 +381,7 @@ export function createAutoGenerate({ signal } = {}) {
     reason.hidden = !details.length;
     fill(slots, (status.slots || []).map((slot, index) => el("li", { class: "auto-slot" }, [
       el("strong", { text: t("auto.slot", { n: slot.id ?? index + 1 }) }),
-      el("span", { text: slot.state || "idle" }),
+      el("span", { text: t("state." + String(slot.state || "idle")) }),
       el("span", { class: "auto-note", text: slot.worker_name || slot.name || "" }),
       slot.remaining_cooldown_seconds ? el("span", { class: "auto-note", text: t("auto.slot.remaining", { n: Math.ceil(count(slot.remaining_cooldown_seconds)) }) }) : null,
     ])));
@@ -459,7 +458,7 @@ export function createAutoGenerate({ signal } = {}) {
       const text = password ? result.password : result.log;
       if (typeof text !== "string") throw new Error("Worker details are unavailable");
       if (!await copyText(text)) throw new Error("Clipboard is unavailable");
-      toast(password ? "Password copied" : "Full log copied", "ok");
+      toast(password ? t("v3.auto.password_copied") : t("v3.auto.full_log_copied"), "ok");
     } catch (exception) {
       if (!disposed) toast(exception.message, "err");
     }
@@ -523,12 +522,12 @@ export async function mount({ root, signal }) {
     fields[key] = input;
     return el("label", { class: "field" }, [el("span", { class: "field__label", text: label }), input]);
   };
-  const keyPlaceholder = (saved) => saved ? "Saved. Leave blank to keep it." : "Enter API key";
-  const save = button({ label: "Save AI judge", disabled: true });
+  const keyPlaceholder = (saved) => saved ? t("v3.auto.key_saved") : t("v3.auto.key_enter");
+  const save = button({ label: t("v3.auto.ai_saved"), disabled: true });
   const form = el("form", { class: "stack" }, [
     el("div", { class: "auto-fields auto-judge-fields" }, [
-      field("custom_ai_url", "Endpoint URL", { type: "url", placeholder: "https://api.openai.com/v1" }),
-      field("custom_ai_model", "Model ID", { placeholder: "e.g. gpt-4o-mini" }),
+      field("custom_ai_url", t("v3.auto.endpoint"), { type: "url", placeholder: "https://api.openai.com/v1" }),
+      field("custom_ai_model", t("v3.auto.model_id"), { placeholder: t("v3.auto.model_example") }),
       field("custom_ai_key", "API key", { type: "password", autocomplete: "new-password" }),
     ]), save, error,
   ]);
@@ -548,7 +547,7 @@ export async function mount({ root, signal }) {
       if (signal.aborted) return;
       if (body.custom_ai_key) key.placeholder = keyPlaceholder(true);
       key.value = "";
-      toast("AI judge settings saved", "ok");
+      toast(t("v3.auto.ai_saved"), "ok");
     } catch (e) {
       if (!signal.aborted) error.textContent = e.message;
     } finally {
@@ -558,8 +557,8 @@ export async function mount({ root, signal }) {
   });
   for (const input of Object.values(fields)) input.readOnly = true;
   root.append(el("div", { class: "stack" }, [view.node, card({
-    title: "AI judge endpoint",
-    desc: "Use an OpenAI-compatible vision model. Leave the endpoint blank to use this gateway.",
+    title: t("v3.auto.ai_title"),
+    desc: t("v3.auto.ai_desc"),
     body: form,
   })]));
   async function loadJudge() {

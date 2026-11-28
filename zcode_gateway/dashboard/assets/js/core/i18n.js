@@ -1015,6 +1015,15 @@ const en = {
   "v3.vpn.surfshark_locations": "Surfshark locations",
   "v3.vpn.key_saved": "Surfshark keys saved.",
   "v3.vpn.key_removed": "Surfshark keys removed.",
+  "v3.auto.goal_mode": "Goal mode",
+  "v3.auto.attempts_mode": "Attempts mode",
+  "v3.auto.desktop_window": "Desktop window",
+  "v3.auto.background_window": "Background (hidden)",
+  "v3.generator.started": "Started {n} signup worker(s).",
+  "v3.generator.running": "Running",
+  "v3.generator.finished": "Finished",
+  "v3.generator.failed": "Failed",
+  "v3.generator.claims": "Claims",
 };
 
 const fa = {
@@ -2023,6 +2032,15 @@ const fa = {
   "v3.vpn.surfshark_locations": "موقعیت‌های سرف‌شارک",
   "v3.vpn.key_saved": "کلیدهای سرف‌شارک ذخیره شدند.",
   "v3.vpn.key_removed": "کلیدهای سرف‌شارک حذف شدند.",
+  "v3.auto.goal_mode": "رسیدن به تعداد حساب موفق",
+  "v3.auto.attempts_mode": "تعداد تلاش مشخص",
+  "v3.auto.desktop_window": "پنجره دسکتاپ",
+  "v3.auto.background_window": "در پس‌زمینه (مخفی)",
+  "v3.generator.started": "{n} فرایند ثبت‌نام شروع شد.",
+  "v3.generator.running": "در حال اجرا",
+  "v3.generator.finished": "تمام‌شده",
+  "v3.generator.failed": "ناموفق",
+  "v3.generator.claims": "دریافت پلن‌ها",
 };
 
 const DICT = { en, fa };

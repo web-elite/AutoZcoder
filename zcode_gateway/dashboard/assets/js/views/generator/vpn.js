@@ -9,13 +9,14 @@ import { el, fill } from "../../core/dom.js";
 import { api } from "../../core/api.js";
 import { toast } from "../../core/toast.js";
 import { card, button, badge } from "../../core/ui.js";
+import { t } from "../../core/i18n.js";
 
 const STATE_TONE = {
   ready: "ok", starting: "warn", reconnecting: "warn", failed: "err", stopped: "",
 };
 const STATE_LABEL = {
-  ready: "Connected", starting: "Connecting", reconnecting: "Reconnecting",
-  failed: "Failed", stopped: "Not running",
+  ready: t("v3.vpn.connected"), starting: t("v3.vpn.connecting"), reconnecting: t("v3.vpn.reconnecting"),
+  failed: t("v3.vpn.failed"), stopped: t("v3.vpn.not_running"),
 };
 
 function ago(ms) {
@@ -40,13 +41,13 @@ function switchField(label, help, checked, onChange) {
 }
 
 function summaryBadge(info, kind) {
-  if (!info.installed) return badge("Not available", "");
-  if (kind === "surfshark" && !info.keys?.saved) return badge("Key pair needed", "");
-  if (!info.config?.enabled) return badge("Off", "");
+  if (!info.installed) return badge(t("v3.vpn.not_available"), "");
+  if (kind === "surfshark" && !info.keys?.saved) return badge(t("v3.vpn.key_needed"), "");
+  if (!info.config?.enabled) return badge(t("v3.vpn.off"), "");
   const total = (info.config?.regions || []).length;
   if (info.live) return badge(`${info.live} of ${total} connected`, "ok");
-  if (info.running) return badge("Connecting", "warn");
-  return badge("Not running", "");
+  if (info.running) return badge(t("v3.vpn.connecting"), "warn");
+  return badge(t("v3.vpn.not_running"), "");
 }
 
 function modePicker(name, cfg, save) {
@@ -56,7 +57,7 @@ function modePicker(name, cfg, save) {
       if (cfg.mode === value) return;
       const patch = { mode: value };
       if (value === "single") patch.pinned = cfg.pinned || (cfg.regions || [])[0] || "";
-      save(patch, value === "single" ? "Stays on one region" : "Takes turns over its regions");
+      save(patch, value === "single" ? t("v3.auto.stay_one") : t("v3.auto.random") );
     });
     return el("label", { class: "vpn-mode" }, [
       input, el("span", {}, [
@@ -75,12 +76,12 @@ function modePicker(name, cfg, save) {
       el("option", { value: r, text: r, selected: r === (cfg.pinned || cfg.regions[0]) })));
     select.addEventListener("change", () => save({ pinned: select.value }, "Region pinned: " + select.value));
     pinned = el("div", { class: "field" }, [
-      el("label", { class: "field__label", htmlFor: select.id, text: "Region in use" }),
+      el("label", { class: "field__label", htmlFor: select.id, text: t("v3.vpn.region_in_use") }),
       select,
     ]);
   }
   return el("fieldset", { class: "vpn-routing" }, [
-    el("legend", { text: "Region preference" }), row, pinned,
+    el("legend", { text: t("v3.vpn.region_preference") }), row, pinned,
   ]);
 }
 
@@ -156,7 +157,7 @@ export function createVpnCard(provider, signal) {
   }
 
   async function saveRegions(kind, what) {
-    if (!picked[kind].length) { toast("Choose at least one region", "warn"); return; }
+    if (!picked[kind].length) { toast(t("v3.vpn.choose_region"), "warn"); return; }
     const selection = picked[kind];
     const saved = await act("save", `/admin/dash/generator/vpn/${kind}/settings`,
       { regions: selection }, `${what}: ${selection.length} chosen`);
@@ -180,20 +181,20 @@ export function createVpnCard(provider, signal) {
         el("span", { class: "dot dot--" + (tone || "ok") + (row.state === "ready" ? " dot--live" : "") }),
         el("b", { class: "job__name truncate", text: name }),
         el("span", { class: "mono text-xs muted", text: row.region }),
-        pinned ? badge("in use", "ok") : null,
+        pinned ? badge(t("v3.vpn.region_in_use"), "ok") : null,
         badge(label, tone),
         el("span", { class: "mono text-xs faint", text: row.exitIp || "—" }),
         el("span", { class: "faint text-xs", text: row.location && kind === "psiphon" ? row.location : "" }),
         el("span", { class: "spacer" }),
         info.config?.mode === "single" && !pinned
-          ? button({ label: "Stay on this", onClick: () => act("pin",
+          ? button({ label: t("v3.vpn.stay_on"), onClick: () => act("pin",
               `/admin/dash/generator/vpn/${kind}/settings`, { pinned: row.region },
               "Pinned " + name) })
           : null,
         button({
-          label: "New address", icon: "refresh", variant: "quiet",
+          label: t("v3.vpn.new_address"), icon: "refresh", variant: "quiet",
           disabled: busy !== "" || row.state === "stopped",
-          title: "Reconnect this region; it usually lands on another exit address",
+          title: t("v3.vpn.new_address_help"),
           onClick: () => act("renew:" + row.region, `/admin/dash/generator/vpn/${kind}/renew`,
             { region: row.region }, name + " is getting a new address"),
         }),
@@ -226,44 +227,44 @@ export function createVpnCard(provider, signal) {
         el("h3", { id: "vpn-psiphon", text: "Psiphon" }),
         summaryBadge(info, "psiphon"),
         el("span", { class: "spacer" }),
-        button({ label: "Update servers", icon: "refresh", disabled: working,
-                 title: "Connect once without a region to fetch Psiphon's current server list",
+        button({ label: t("v3.vpn.update_servers"), icon: "refresh", disabled: working,
+                 title: t("v3.vpn.update_psiphon_help"),
                  onClick: () => act("update", "/admin/dash/generator/vpn/psiphon/update", {},
-                   "Psiphon servers updated") }),
+                   t("v3.vpn.psiphon_updated")) }),
       ]),
       info.problem ? el("div", { class: "notice notice--warn", text: info.problem }) : null,
       el("div", { class: "field" }, [
-        el("b", { text: "Regions" }),
-        el("div", { class: "field__help", text: `${(info.available || []).length} available. Only connected regions are used.` }),
+        el("b", { text: t("v3.vpn.regions") }),
+        el("div", { class: "field__help", text: t("v3.vpn.regions_available", { n: (info.available || []).length }) }),
         chips,
       ]),
       regionsChanged("psiphon", info)
         ? el("div", { class: "row" }, [
-            el("span", { class: "text-xs text-warn", text: `${picked.psiphon.length} chosen — not saved` }),
-            button({ label: "Save regions", variant: "primary",
+            el("span", { class: "text-xs text-warn", text: t("v3.vpn.chosen_unsaved", { n: picked.psiphon.length }) }),
+            button({ label: t("v3.vpn.save_regions"), variant: "primary",
                      onClick: () => saveRegions("psiphon", "Psiphon regions") }),
-            button({ label: "Undo", onClick: () => { dirty.psiphon = false; picked.psiphon = null; render(); } }),
+            button({ label: t("v3.vpn.undo"), onClick: () => { dirty.psiphon = false; picked.psiphon = null; render(); } }),
           ])
         : null,
       el("div", { class: "row" }, [
-        button({ label: info.running ? "Connect / restart" : "Connect", icon: "bolt", variant: "primary",
+        button({ label: info.running ? t("v3.vpn.connect_restart") : t("v3.vpn.connect"), icon: "bolt", variant: "primary",
                  disabled: working || !cfg.enabled || !(cfg.regions || []).length,
                  onClick: () => act("connect", "/admin/dash/generator/vpn/psiphon/connect", {},
-                   "Psiphon is connecting") }),
-        button({ label: "Disconnect", disabled: working || !info.running,
+                   t("v3.vpn.psiphon_connecting")) }),
+        button({ label: t("v3.vpn.disconnect"), disabled: working || !info.running,
                  onClick: () => act("disconnect", "/admin/dash/generator/vpn/psiphon/disconnect", {},
-                   "Psiphon disconnected") }),
+                   t("v3.vpn.psiphon_disconnected")) }),
         info.lastError ? el("span", { class: "text-xs text-err", text: info.lastError }) : null,
       ]),
       (info.regions || []).length
         ? el("div", {}, info.regions.map((row) => regionRow("psiphon", row, info)))
         : null,
       modePicker("psiphon-mode", cfg, save),
-      switchField("Psiphon enabled", "Off stops every region and takes Psiphon out of the IP source list.",
-        cfg.enabled !== false, (v) => save({ enabled: v }, v ? "Psiphon enabled" : "Psiphon off")),
-      switchField("Connect when the gateway starts", "Brings the chosen regions up after a restart.",
+      switchField(t("v3.vpn.enabled"), t("v3.vpn.enabled_help"),
+        cfg.enabled !== false, (v) => save({ enabled: v }, v ? t("v3.vpn.psiphon_enabled") : t("v3.vpn.psiphon_disabled"))),
+      switchField(t("v3.vpn.auto_start"), t("v3.vpn.auto_start_help"),
         !!cfg.autoStart, (v) => save({ autoStart: v },
-          v ? "Psiphon connects at start" : "Psiphon waits for Connect")),
+          v ? t("v3.vpn.psiphon_connecting") : t("v3.vpn.psiphon_disabled"))),
     ]);
   }
 
@@ -274,13 +275,13 @@ export function createVpnCard(provider, signal) {
     const open = !saved || keys.editing;
     const saveKeys = async () => {
       if (busy) return;
-      if (!keys.privateKey.trim()) { toast("Paste the private key", "warn"); return; }
+      if (!keys.privateKey.trim()) { toast(t("v3.vpn.paste_private"), "warn"); return; }
       busy = "keys";
       render();
       try {
         const saved = await talking("/admin/dash/generator/vpn/surfshark/keys",
           { privateKey: keys.privateKey.trim(), publicKey: keys.publicKey.trim() },
-          "Surfshark key pair saved");
+          t("v3.vpn.key_saved"));
         if (saved) {
           keys.editing = false; keys.privateKey = ""; keys.publicKey = "";
         }
@@ -302,33 +303,32 @@ export function createVpnCard(provider, signal) {
 
     return el("div", { class: "stack--tight" }, [
       el("div", { class: "row" }, [
-        el("b", { text: "Surfshark key pair" }),
-        saved && !keys.editing ? el("span", { class: "text-xs text-ok", text: "saved" }) : null,
+        el("b", { text: t("v3.vpn.key_pair") }),
+        saved && !keys.editing ? el("span", { class: "text-xs text-ok", text: t("v3.vpn.saved") }) : null,
         el("span", { class: "spacer" }),
         saved && !keys.editing
-          ? button({ label: "Replace", disabled: busy !== "", onClick: () => { keys.editing = true; render(); } })
+          ? button({ label: t("v3.vpn.replace"), disabled: busy !== "", onClick: () => { keys.editing = true; render(); } })
           : null,
         saved && !keys.editing
-          ? button({ label: "Remove", variant: "danger", disabled: busy !== "",
+          ? button({ label: t("v3.vpn.remove"), variant: "danger", disabled: busy !== "",
                      onClick: () => act("keys", "/admin/dash/generator/vpn/surfshark/keys/remove", {},
-                       "Surfshark key pair removed") })
+                       t("v3.vpn.key_removed")) })
           : null,
       ]),
       saved && !keys.editing
-        ? el("div", { class: "field__help mono", text: "Public key " + (info.keys?.publicKey || "") })
+        ? el("div", { class: "field__help mono", text: t("v3.vpn.public_key") + " " + (info.keys?.publicKey || "") })
         : null,
       open
         ? el("div", { class: "stack--tight" }, [
             el("div", { class: "field__help", text:
-              "Surfshark account → VPN → Manual setup → Desktop or mobile → WireGuard → "
-              + "Generate a new key pair. Paste both keys; the private key is never sent back." }),
-            field("Public key", pub),
-            field("Private key", priv, "Checked against the public key before saving."),
+              t("v3.vpn.key_help") }),
+            field(t("v3.vpn.public_key"), pub),
+            field(t("v3.vpn.private_key"), priv, t("v3.vpn.public_key_help")),
             el("div", { class: "row" }, [
-              button({ label: "Save key pair", variant: "primary", disabled: busy !== "",
+              button({ label: t("v3.vpn.save_keys"), variant: "primary", disabled: busy !== "",
                        onClick: saveKeys }),
               keys.editing
-                ? button({ label: "Cancel", disabled: busy !== "", onClick: () => { keys.editing = false; keys.privateKey = ""; keys.publicKey = ""; render(); } })
+                ? button({ label: t("v3.vpn.cancel"), disabled: busy !== "", onClick: () => { keys.editing = false; keys.privateKey = ""; keys.publicKey = ""; render(); } })
                 : null,
             ]),
           ])
@@ -348,8 +348,8 @@ export function createVpnCard(provider, signal) {
     const counts = new Map();
     for (const s of servers) counts.set(s.country, (counts.get(s.country) || 0) + 1);
 
-    const searchInput = el("input", { class: "input", type: "search", id: "vpn-location-search", "aria-label": "Search locations",
-                                      placeholder: "Search a country or city…", value: search });
+    const searchInput = el("input", { class: "input", type: "search", id: "vpn-location-search", "aria-label": t("v3.vpn.search_locations"),
+                                      placeholder: t("v3.vpn.search_locations"), value: search });
     searchInput.addEventListener("input", () => {
       search = searchInput.value;
       const results = box.querySelector("#vpn-location-results");
@@ -358,7 +358,7 @@ export function createVpnCard(provider, signal) {
     });
 
     const chips = el("div", { class: "vpn-scroll vpn-location-results row", id: "vpn-location-results",
-                              role: "region", "aria-label": "Available locations", tabIndex: 0 },
+                              role: "region", "aria-label": t("v3.vpn.available_locations"), tabIndex: 0 },
       shown.map((s) => {
         const on = picked.surfshark.includes(s.id);
         const many = (counts.get(s.country) || 0) > 1;
@@ -376,58 +376,58 @@ export function createVpnCard(provider, signal) {
         el("h3", { id: "vpn-surfshark", text: "Surfshark" }),
         summaryBadge(info, "surfshark"),
         el("span", { class: "spacer" }),
-        button({ label: "Update servers", icon: "refresh", disabled: working,
-                 title: "Read Surfshark's public list of servers",
+        button({ label: t("v3.vpn.update_servers"), icon: "refresh", disabled: working,
+                 title: t("v3.vpn.update_servers"),
                  onClick: () => act("update", "/admin/dash/generator/vpn/surfshark/update", {},
-                   "Surfshark servers updated") }),
+                   t("v3.vpn.surfshark_updated")) }),
       ]),
       info.problem ? el("div", { class: "notice notice--warn", text: info.problem }) : null,
       el("div", { class: "notice notice--warn" }, [
-        el("strong", { text: "Surfshark subscription required. " }),
-        el("span", { text: "You need an active paid Surfshark subscription to use Surfshark as an IP route." }),
+        el("strong", { text: t("v3.vpn.subscription_required") + " " }),
+        el("span", { text: t("v3.vpn.subscription_help") }),
       ]),
       keyPanel(info),
       info.keys?.saved
         ? el("div", { class: "stack--tight" }, [
             el("div", { class: "field__help", text: servers.length
-              ? `${servers.length} locations in ${new Set(servers.map((s) => s.countryCode)).size} countries`
-                + (info.updatedAt ? ` · updated ${ago(info.updatedAt)}` : "")
-              : "Press Update servers to load Surfshark's locations." }),
+              ? t("v3.vpn.location_count", { n: servers.length, countries: new Set(servers.map((s) => s.countryCode)).size })
+                + (info.updatedAt ? " · " + t("v3.vpn.updated", { when: ago(info.updatedAt) }) : "")
+              : t("v3.vpn.load_locations") }),
             servers.length ? searchInput : null,
              shown.length ? chips : servers.length
-               ? el("div", { class: "field__help", text: "No locations match your search." }) : null,
+               ? el("div", { class: "field__help", text: t("v3.vpn.no_location_match") }) : null,
             regionsChanged("surfshark", info)
               ? el("div", { class: "row" }, [
-                  el("span", { class: "text-xs text-warn", text: `${picked.surfshark.length} chosen — not saved` }),
-                  button({ label: "Save locations", variant: "primary",
-                           onClick: () => saveRegions("surfshark", "Surfshark locations") }),
-                  button({ label: "Undo", onClick: () => { dirty.surfshark = false; picked.surfshark = null; render(); } }),
+                  el("span", { class: "text-xs text-warn", text: t("v3.vpn.chosen_unsaved", { n: picked.surfshark.length }) }),
+                  button({ label: t("v3.vpn.save_regions"), variant: "primary",
+                           onClick: () => saveRegions("surfshark", t("v3.vpn.surfshark_locations")) }),
+                  button({ label: t("v3.vpn.undo"), onClick: () => { dirty.surfshark = false; picked.surfshark = null; render(); } }),
                 ])
               : null,
             el("div", { class: "row" }, [
-              button({ label: info.running ? "Connect / restart" : "Connect", icon: "bolt", variant: "primary",
+              button({ label: info.running ? t("v3.vpn.connect_restart") : t("v3.vpn.connect"), icon: "bolt", variant: "primary",
                        disabled: working || !cfg.enabled || !(cfg.regions || []).length,
                        onClick: () => act("connect", "/admin/dash/generator/vpn/surfshark/connect", {},
-                         "Surfshark is connecting") }),
-              button({ label: "Disconnect", disabled: working || !info.running,
+                         t("v3.vpn.surfshark_connecting")) }),
+              button({ label: t("v3.vpn.disconnect"), disabled: working || !info.running,
                        onClick: () => act("disconnect", "/admin/dash/generator/vpn/surfshark/disconnect", {},
-                         "Surfshark disconnected") }),
+                         t("v3.vpn.surfshark_disconnected")) }),
               info.lastError ? el("span", { class: "text-xs text-err", text: info.lastError }) : null,
             ]),
              (info.regions || []).length
                ? el("div", { class: "stack--tight" }, [
                    el("b", { text: `Location status (${info.regions.length})` }),
                    el("div", { class: "vpn-scroll vpn-location-status", id: "vpn-location-status",
-                               role: "region", "aria-label": "Location status", tabIndex: 0 },
+                               role: "region", "aria-label": t("v3.vpn.location_status", { n: info.regions.length }), tabIndex: 0 },
                       info.regions.map((row) => regionRow("surfshark", row, info))),
                  ])
               : null,
             modePicker("surfshark-mode", cfg, save),
-            switchField("Surfshark enabled", "Off stops every location and takes Surfshark out of the IP source list.",
-              cfg.enabled !== false, (v) => save({ enabled: v }, v ? "Surfshark enabled" : "Surfshark off")),
-            switchField("Connect when the gateway starts", "Brings the chosen locations up after a restart.",
+            switchField(t("v3.vpn.surfshark_enabled"), t("v3.vpn.surfshark_enabled_help"),
+              cfg.enabled !== false, (v) => save({ enabled: v }, v ? t("v3.vpn.surfshark_enabled_msg") : t("v3.vpn.surfshark_disabled_msg"))),
+            switchField(t("v3.vpn.auto_start"), t("v3.vpn.auto_start_help"),
               !!cfg.autoStart, (v) => save({ autoStart: v },
-                v ? "Surfshark connects at start" : "Surfshark waits for Connect")),
+                v ? t("v3.vpn.surfshark_connecting") : t("v3.vpn.surfshark_disabled_msg"))),
           ])
         : null,
     ]);
